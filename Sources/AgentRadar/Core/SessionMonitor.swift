@@ -106,7 +106,8 @@ final class SessionMonitor {
                 // 有 stopReason 说明回合结束，5秒内算刚完成，否则已闲置
                 if last.stopReason != nil {
                     session.status = elapsed < 5 ? .completed : .idle
-                } else if elapsed <= 15 {
+                } else if elapsed <= 5 {
+                    // fullScan 时只有极短时间内才算运行中（避免历史会话误判）
                     session.status = .running
                 } else {
                     session.status = .idle
