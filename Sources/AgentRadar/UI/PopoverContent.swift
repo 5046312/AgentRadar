@@ -13,9 +13,8 @@ struct PopoverContent: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(store.sortedSessions, id: \.id) { s in
-                            SessionRow(session: s)
-                            Divider().opacity(0.4)
+                        ForEach(store.projectGroups) { group in
+                            ProjectSection(group: group)
                         }
                     }
                 }
@@ -23,7 +22,7 @@ struct PopoverContent: View {
             Divider()
             footer
         }
-        .frame(width: 360, height: 420)
+        .frame(width: 380, height: 440)
     }
 
     private var header: some View {
@@ -52,12 +51,24 @@ struct PopoverContent: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
+            Button(action: { store.toggleSound() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: store.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    Text(store.soundEnabled ? "音效开" : "音效关")
+                }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11))
+            .foregroundStyle(store.soundEnabled ? .primary : .secondary)
+
+            Spacer()
+
             Button("打开 ~/.claude") { openClaudeDir() }
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Spacer()
+
             Button("退出") { NSApp.terminate(nil) }
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
@@ -82,5 +93,48 @@ struct PopoverContent: View {
     private func openClaudeDir() {
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
         NSWorkspace.shared.open(url)
+    }
+}
+
+struct ProjectSection: View {
+    let group: ProjectGroup
+
+    @State private var expanded = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(nsColor: group.aggregateStatus.color))
+                        .frame(width: 8, height: 8)
+                    Text(group.name)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("\(group.sessions.count)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                ForEach(group.sessions, id: \.id) { s in
+                    SessionRow(session: s)
+                    Divider().opacity(0.3).padding(.leading, 30)
+                }
+            }
+
+            Divider().opacity(0.6)
+        }
     }
 }

@@ -150,7 +150,7 @@ final class TrafficLightView: NSView {
         } else {
             badge.string = ""
             badge.isHidden = true
-            let totalW = padding + dotsWidth + padding
+            let totalW = padding + dotsWidth + 4
             updateItemWidth(totalW)
         }
     }

@@ -78,10 +78,15 @@ final class SessionMonitor {
         let (lines, newOffset) = JSONLReader.readNewLines(from: url, startingAt: startOffset)
         session.fileOffset = newOffset
 
-        var sawNewEntry = false
+        guard !lines.isEmpty else {
+            if existing == nil { store.upsert(session) }
+            return
+        }
+
+        var lastSummary: JSONLEntrySummary?
         for line in lines {
             guard let summary = JSONLReader.parseSummary(line) else { continue }
-            sawNewEntry = true
+            lastSummary = summary
             session.lastEventTimestamp = summary.timestamp
             session.lastActivity = max(session.lastActivity, summary.timestamp)
             if let b = summary.gitBranch { session.gitBranch = b }
@@ -92,24 +97,36 @@ final class SessionMonitor {
             session.inputTokens += summary.inputTokens
             session.outputTokens += summary.outputTokens
             session.cacheReadTokens += summary.cacheReadTokens
-
-            if summary.stopReason != nil && summary.stopReason != "tool_use" {
-                session.status = .completed
-                session.completedFlashUntil = Date().addingTimeInterval(3)
-            } else if sawNewEntry {
-                session.status = .running
-            }
         }
 
-        if sawNewEntry {
-            let elapsed = Date().timeIntervalSince(session.lastEventTimestamp)
-            if session.status == .running && elapsed > 30 {
+        let elapsed = Date().timeIntervalSince(session.lastEventTimestamp)
+
+        if fullScan {
+            if let last = lastSummary {
+                if last.stopReason != nil && last.stopReason != "tool_use" {
+                    session.status = elapsed < 5 ? .completed : .idle
+                } else if elapsed <= 15 {
+                    session.status = .running
+                } else {
+                    session.status = .idle
+                }
+            } else {
                 session.status = .idle
             }
-            store.upsert(session)
-        } else if existing == nil {
-            store.upsert(session)
+        } else {
+            if let last = lastSummary {
+                if last.stopReason != nil && last.stopReason != "tool_use" {
+                    session.status = .completed
+                    session.completedFlashUntil = Date().addingTimeInterval(3)
+                } else if elapsed <= 30 {
+                    session.status = .running
+                } else {
+                    session.status = .idle
+                }
+            }
         }
+
+        store.upsert(session)
     }
 
     private func startFSEvents(path: String) {
