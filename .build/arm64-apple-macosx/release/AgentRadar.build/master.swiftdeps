@@ -1,0 +1,18 @@
+version: "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
+options: "871945fbdbf6b3f9352edeb9cf3d5ac87a383c80e8b6aff710a0963d10b3680b"
+build_start_time: [1779441412, 867165000]
+build_end_time: [1779441414, 834900000]
+inputs:
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/App.swift": [1779440419, 288521479]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/AppDelegate.swift": [1779440197, 238417063]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/HookEventReader.swift": [1779440313, 2937579]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/JSONLReader.swift": [1779440283, 33019135]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionMonitor.swift": [1779440456, 382555425]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionStore.swift": [1779440282, 11749901]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Models/HookEvent.swift": [1779440199, 285164013]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Models/Session.swift": [1779440198, 262245386]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/PopoverContent.swift": [1779440316, 74280425]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/SessionRow.swift": [1779440317, 94475883]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/StatusBarController.swift": [1779441336, 69869662]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/TrafficLightView.swift": [1779441382, 975848923]
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Util/PathUtils.swift": [1779440200, 309604577]

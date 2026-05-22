@@ -1,0 +1,13 @@
+/Users/long/project/AgentRadar/Sources/AgentRadar/App.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/AppDelegate.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Core/HookEventReader.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Core/JSONLReader.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionMonitor.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionStore.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Models/HookEvent.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Models/Session.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/UI/PopoverContent.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/UI/SessionRow.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/UI/StatusBarController.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/UI/TrafficLightView.swift
+/Users/long/project/AgentRadar/Sources/AgentRadar/Util/PathUtils.swift

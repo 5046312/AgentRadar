@@ -1,0 +1,72 @@
+{
+  "": {
+    "dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/AgentRadar.d",
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/AgentRadar.o",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/master.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/App.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/App.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/App.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/AppDelegate.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/AppDelegate.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/HookEventReader.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEventReader.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEventReader~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEventReader.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/JSONLReader.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/JSONLReader.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/JSONLReader~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/JSONLReader.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionMonitor.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionMonitor.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionMonitor~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionMonitor.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Core/SessionStore.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionStore.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionStore.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Models/HookEvent.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEvent.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEvent~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/HookEvent.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Models/Session.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/Session.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/Session~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/Session.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/PopoverContent.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PopoverContent.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PopoverContent~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PopoverContent.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/SessionRow.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionRow.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionRow~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/SessionRow.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/StatusBarController.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/StatusBarController.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/StatusBarController~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/StatusBarController.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/UI/TrafficLightView.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/TrafficLightView.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/TrafficLightView~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/TrafficLightView.swiftdeps"
+  },
+  "/Users/long/project/AgentRadar/Sources/AgentRadar/Util/PathUtils.swift": {
+    "object": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PathUtils.swift.o",
+    "swiftmodule": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PathUtils~partial.swiftmodule",
+    "swift-dependencies": "/Users/long/project/AgentRadar/.build/arm64-apple-macosx/release/AgentRadar.build/PathUtils.swiftdeps"
+  }
+}
