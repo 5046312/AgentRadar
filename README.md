@@ -1,45 +1,79 @@
 # AgentRadar
 
-macOS 状态栏工具，监控多个 Claude Code 任务的运行状态。
+English | [简体中文](README.zh-CN.md)
 
-## 功能
+<p align="center">
+  <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
+</p>
 
-- 状态栏红绿灯：绿色脉冲（运行）/ 黄色闪烁（等待输入）/ 红色（出错）
-- 任务完成时绿灯闪 3 次
-- 角标数字：当前活跃任务数
-- 悬浮 Popover：每个会话的项目名、git 分支、当前工具、token 使用量、相对时间
-- 双数据源：FSEvents 监听 `~/.claude/projects/**/*.jsonl` + 可选 hook 事件 `~/.agentradar/events.jsonl`
+AgentRadar is a native macOS menu bar app for watching multiple Claude Code sessions at a glance.
 
-## 构建
+## Features
+
+- Traffic-light status in the menu bar: running, waiting, completed, error, idle.
+- Active-session badge count.
+- Popover with project name, git branch, current tool, token usage, and recent activity.
+- Reads `~/.claude/projects/**/*.jsonl`.
+- Optional hook event source at `~/.agentradar/events.jsonl`.
+- Native Swift/AppKit/SwiftUI app with no third-party runtime dependencies.
+
+## Requirements
+
+- macOS 14 or later.
+- Swift 5.9 or later.
+- Claude Code.
+- Optional: `jq`, only required by `install-hooks.sh`.
+
+## Build
 
 ```bash
 ./build.sh
 open ./AgentRadar.app
 ```
 
-要求：macOS 14+，Swift 5.9+（自带的 Command Line Tools 即可）。
+`build.sh` runs a SwiftPM release build and assembles `AgentRadar.app`.
 
-## 安装 hooks（可选）
+## Install Hooks Optional
 
-让状态切换更可靠：
+Hooks make waiting and completed states more reliable:
 
 ```bash
-brew install jq        # 仅在缺少 jq 时
+brew install jq
 ./install-hooks.sh
 ```
 
-会修改 `~/.claude/settings.json` 注入 Stop / Notification / PreToolUse / PostToolUse / UserPromptSubmit / SubagentStop 钩子，每次事件追加一行 JSON 到 `~/.agentradar/events.jsonl`，原文件备份保存为 `settings.json.bak.<时间戳>`。
+The script backs up `~/.claude/settings.json`, then injects `Stop`, `Notification`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `SubagentStop` hooks. Events are appended to `~/.agentradar/events.jsonl`.
 
-## 状态聚合优先级
-
-red > yellow > green pulse > green flash > 灰
-
-## 卸载
+## Package DMG
 
 ```bash
-rm -rf AgentRadar.app .build
-# 还原 settings.json
-mv ~/.claude/settings.json.bak.* ~/.claude/settings.json
+./make-dmg.sh
 ```
 
-详见 [PLAN.md](PLAN.md)。
+`AgentRadar.dmg` is a local build artifact and should not be committed.
+
+## Privacy
+
+AgentRadar only reads local Claude Code session files and optional local hook events. It does not upload data and contains no network requests.
+
+## Development
+
+```bash
+swift build
+swift run AgentRadar
+```
+
+This project uses SwiftPM. Source code lives in `Sources/AgentRadar`.
+
+## Uninstall
+
+```bash
+rm -rf AgentRadar.app .build AgentRadar.dmg
+rm -rf ~/.agentradar
+```
+
+To restore hook settings, replace `~/.claude/settings.json` with the `settings.json.bak.<timestamp>` backup created by `install-hooks.sh`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

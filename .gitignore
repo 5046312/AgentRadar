@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+
+AgentRadar.app/
+AgentRadar.dmg
+*-temp.dmg
+
+*.xcuserstate
+*.xcuserdata/
