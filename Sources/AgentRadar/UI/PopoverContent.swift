@@ -99,7 +99,13 @@ struct PopoverContent: View {
 struct ProjectSection: View {
     let group: ProjectGroup
 
-    @State private var expanded = true
+    @State private var expanded: Bool
+
+    init(group: ProjectGroup) {
+        self.group = group
+        // 默认只展开有运行中会话的项目
+        _expanded = State(initialValue: group.sessions.contains { $0.status == .running })
+    }
 
     var body: some View {
         VStack(spacing: 0) {

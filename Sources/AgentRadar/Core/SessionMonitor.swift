@@ -102,26 +102,12 @@ final class SessionMonitor {
         let elapsed = Date().timeIntervalSince(session.lastEventTimestamp)
 
         if fullScan {
-            if let last = lastSummary {
-                // 有 stopReason 说明回合结束，5秒内算刚完成，否则已闲置
-                if last.stopReason != nil {
-                    session.status = elapsed < 5 ? .completed : .idle
-                } else if elapsed <= 5 {
-                    // fullScan 时只有极短时间内才算运行中（避免历史会话误判）
-                    session.status = .running
-                } else {
-                    session.status = .idle
-                }
-            } else {
-                session.status = .idle
-            }
+            // 启动时全部设为 idle
+            session.status = .idle
         } else {
             if let last = lastSummary {
-                // 新事件：有 stopReason 就触发完成闪烁（包括 tool_use 结束的情况）
-                if last.stopReason != nil {
-                    session.status = .completed
-                    session.completedFlashUntil = Date().addingTimeInterval(3)
-                } else if elapsed <= 30 {
+                // 实时监控：30秒内算运行中，否则 idle
+                if elapsed <= 30 {
                     session.status = .running
                 } else {
                     session.status = .idle
