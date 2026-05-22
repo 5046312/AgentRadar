@@ -103,7 +103,8 @@ final class SessionMonitor {
 
         if fullScan {
             if let last = lastSummary {
-                if last.stopReason != nil && last.stopReason != "tool_use" {
+                // 有 stopReason 说明回合结束，5秒内算刚完成，否则已闲置
+                if last.stopReason != nil {
                     session.status = elapsed < 5 ? .completed : .idle
                 } else if elapsed <= 15 {
                     session.status = .running
@@ -115,7 +116,8 @@ final class SessionMonitor {
             }
         } else {
             if let last = lastSummary {
-                if last.stopReason != nil && last.stopReason != "tool_use" {
+                // 新事件：有 stopReason 就触发完成闪烁（包括 tool_use 结束的情况）
+                if last.stopReason != nil {
                     session.status = .completed
                     session.completedFlashUntil = Date().addingTimeInterval(3)
                 } else if elapsed <= 30 {
