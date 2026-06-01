@@ -6,6 +6,8 @@ final class SessionMonitor {
     private let store: SessionStore
     private var streams: [FSEventStreamRef] = []
     private var idleTimer: Timer?
+    private let initialScanFileLimit = 80
+    private let initialScanTailBytes: UInt64 = 64 * 1024
 
     init(store: SessionStore) {
         self.store = store
@@ -15,8 +17,8 @@ final class SessionMonitor {
         for runtime in RuntimeKind.allCases {
             let dir = PathUtils.sessionsDir(for: runtime)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            scanInitial(runtime: runtime)
             startFSEvents(path: dir.path)
+            scanInitial(runtime: runtime)
         }
         idleTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.tickIdle() }
@@ -46,29 +48,43 @@ final class SessionMonitor {
     private func scanClaudeInitial() {
         let dir = PathUtils.sessionsDir(for: .claude)
         guard let projects = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        var candidates: [(url: URL, modifiedAt: Date)] = []
+
         for project in projects {
             let projectDir = dir.appendingPathComponent(project)
-            scanClaudeProjectDir(projectDir)
+            candidates.append(contentsOf: claudeJSONLCandidates(in: projectDir))
+        }
+
+        // 启动阶段只恢复最近会话的尾部，避免大量历史 transcript 阻塞菜单栏交互。
+        let recentFiles = candidates
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .prefix(initialScanFileLimit)
+
+        for candidate in recentFiles {
+            ingestFile(candidate.url, runtime: .claude)
         }
     }
 
-    private func scanClaudeProjectDir(_ dir: URL) {
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
-        for f in files where f.hasSuffix(".jsonl") {
-            let url = dir.appendingPathComponent(f)
-            ingestFile(url, runtime: .claude, fullScan: true)
+    private func claudeJSONLCandidates(in dir: URL) -> [(url: URL, modifiedAt: Date)] {
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        return files.compactMap { fileName in
+            guard fileName.hasSuffix(".jsonl") else { return nil }
+            let url = dir.appendingPathComponent(fileName)
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let modifiedAt = attributes?[.modificationDate] as? Date ?? .distantPast
+            return (url, modifiedAt)
         }
     }
 
-    private func ingestFile(_ url: URL, runtime: RuntimeKind, fullScan: Bool) {
+    private func ingestFile(_ url: URL, runtime: RuntimeKind) {
         let rawSessionId = rawSessionId(for: url, runtime: runtime)
         let sessionId = "\(runtime.rawValue):\(rawSessionId)"
         let projectPath = initialProjectPath(for: url, runtime: runtime)
         let projectName = PathUtils.projectNameFromPath(projectPath)
 
         let existing = store.sessions[sessionId]
-        if runtime == .codex, existing == nil, fullScan {
-            // 启动恢复阶段仍然不靠 Codex JSONL 扫旧状态，只处理运行中新增的文件变化。
+        if runtime == .codex, existing == nil {
+            // Codex 状态只信 hook；没有 hook 占位的 JSONL 文件变化不能创建项目。
             return
         }
         var session = existing ?? Session(
@@ -76,14 +92,14 @@ final class SessionMonitor {
             runtime: runtime,
             projectPath: projectPath,
             projectName: projectName,
-            gitBranch: nil,
             status: .idle,
             lastActivity: Date.distantPast,
             lastEventTimestamp: Date.distantPast,
             activeStartedAt: nil,
-            currentTool: nil,
-            taskTitle: nil,
-            lastAssistantText: nil,
+            activeStartedTokenTotal: nil,
+            tpsSampleTokenTotal: nil,
+            tpsSampleTimestamp: nil,
+            currentTPS: nil,
             inputTokens: 0,
             outputTokens: 0,
             cacheReadTokens: 0,
@@ -95,8 +111,7 @@ final class SessionMonitor {
         )
         session.fileURL = url
 
-        let startOffset = fullScan ? 0 : session.fileOffset
-        let readResult = JSONLReader.readNewLines(from: url, startingAt: startOffset)
+        let readResult = readLines(from: url, existing: existing, runtime: runtime)
         let lines = readResult.lines
         let newOffset = readResult.newOffset
         session.fileOffset = newOffset
@@ -116,14 +131,6 @@ final class SessionMonitor {
                 session.projectPath = cwd
                 session.projectName = PathUtils.projectNameFromPath(cwd)
             }
-            if let b = summary.gitBranch { session.gitBranch = b }
-            if let tool = summary.toolName { session.currentTool = tool }
-            if let txt = summary.userText, !txt.isEmpty {
-                session.taskTitle = String(txt.prefix(120))
-            }
-            if let txt = summary.assistantText, !txt.isEmpty {
-                session.lastAssistantText = String(txt.prefix(200))
-            }
             applyTokenSummary(summary, to: &session)
         }
 
@@ -133,6 +140,14 @@ final class SessionMonitor {
         refreshDerivedStatus(&session, runtime: runtime)
 
         store.upsert(session)
+    }
+
+    private func readLines(from url: URL, existing: Session?, runtime: RuntimeKind) -> (lines: [Data], newOffset: UInt64) {
+        if runtime == .claude, existing == nil {
+            return JSONLReader.readRecentLines(from: url, maxBytes: initialScanTailBytes)
+        }
+        let startOffset = existing?.fileOffset ?? 0
+        return JSONLReader.readNewLines(from: url, startingAt: startOffset)
     }
 
     private func rawSessionId(for url: URL, runtime: RuntimeKind) -> String {
@@ -163,11 +178,13 @@ final class SessionMonitor {
     }
 
     private func applyTokenSummary(_ summary: JSONLEntrySummary, to session: inout Session) {
+        let previousTotal = totalTokens(for: session)
         if let totalTokens = summary.totalTokens {
             session.inputTokens = summary.inputTokens
             session.outputTokens = summary.outputTokens
             session.cacheReadTokens = summary.cacheReadTokens
             session.lastTokenTotal = totalTokens
+            updateCurrentTPS(previousTotal: previousTotal, currentTotal: totalTokens, timestamp: summary.timestamp, session: &session)
             return
         }
         guard summary.inputTokens > 0 || summary.outputTokens > 0 || summary.cacheReadTokens > 0 else {
@@ -178,6 +195,39 @@ final class SessionMonitor {
         session.outputTokens += summary.outputTokens
         session.cacheReadTokens += summary.cacheReadTokens
         session.lastTokenTotal = session.inputTokens + session.outputTokens + session.cacheReadTokens
+        updateCurrentTPS(previousTotal: previousTotal, currentTotal: session.lastTokenTotal, timestamp: summary.timestamp, session: &session)
+    }
+
+    private func updateCurrentTPS(previousTotal: Int, currentTotal: Int, timestamp: Date, session: inout Session) {
+        guard currentTotal > previousTotal else { return }
+
+        guard
+            let previousSampleTotal = session.tpsSampleTokenTotal,
+            let previousSampleTimestamp = session.tpsSampleTimestamp
+        else {
+            session.tpsSampleTokenTotal = currentTotal
+            session.tpsSampleTimestamp = timestamp
+            return
+        }
+
+        let elapsed = timestamp.timeIntervalSince(previousSampleTimestamp)
+        guard elapsed > 0 else {
+            session.tpsSampleTokenTotal = currentTotal
+            session.tpsSampleTimestamp = timestamp
+            return
+        }
+
+        // 运行中 TPS 只在 token 计数真实变化时刷新，避免“没有新 token 但时间增加”造成假低速。
+        session.currentTPS = Double(currentTotal - previousSampleTotal) / elapsed
+        session.tpsSampleTokenTotal = currentTotal
+        session.tpsSampleTimestamp = timestamp
+    }
+
+    private func totalTokens(for session: Session) -> Int {
+        max(
+            session.lastTokenTotal,
+            session.inputTokens + session.outputTokens + session.cacheReadTokens
+        )
     }
 
     private func refreshDerivedStatus(_ session: inout Session, runtime: RuntimeKind) {
@@ -234,7 +284,7 @@ final class SessionMonitor {
         for p in paths where p.hasSuffix(".jsonl") {
             let url = URL(fileURLWithPath: p)
             guard let runtime = runtime(for: url) else { continue }
-            ingestFile(url, runtime: runtime, fullScan: false)
+            ingestFile(url, runtime: runtime)
         }
     }
 

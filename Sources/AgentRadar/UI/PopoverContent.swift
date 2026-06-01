@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import AppKit
 
@@ -70,6 +71,16 @@ struct PopoverContent: View {
                 ForEach(RuntimeKind.allCases) { runtime in
                     runtimeTab(runtime)
                 }
+            }
+
+            HStack(spacing: 4) {
+                Text("所有项目平均 TPS")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text(formattedTPS(store.allProjectsAverageTPS()))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 12)
@@ -277,14 +288,24 @@ private struct HookSettingsView: View {
                 }
             }
 
-            settingsSection("状态栏样式") {
-                Picker("状态栏样式", selection: statusBarStyleBinding) {
-                    ForEach(StatusBarStyle.allCases) { style in
-                        Text(style.displayName).tag(style)
-                    }
+            settingsSection("九宫格速度") {
+                Slider(
+                    value: nineGridAnimationIntervalBinding,
+                    in: SessionStore.minNineGridAnimationInterval...SessionStore.maxNineGridAnimationInterval,
+                    step: 0.02
+                ) {
+                    Text("九宫格速度")
+                } minimumValueLabel: {
+                    Text("快")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                } maximumValueLabel: {
+                    Text("慢")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
 
-                Text(statusBarStyleDescription)
+                Text(nineGridAnimationDescription)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -324,15 +345,6 @@ private struct HookSettingsView: View {
         )
     }
 
-    private var statusBarStyleBinding: Binding<StatusBarStyle> {
-        Binding(
-            get: { sessionStore.statusBarStyle },
-            set: { newValue in
-                sessionStore.setStatusBarStyle(newValue)
-            }
-        )
-    }
-
     private var reminderDescription: String {
         switch sessionStore.reminderStyle {
         case .statusBarBubble:
@@ -342,8 +354,17 @@ private struct HookSettingsView: View {
         }
     }
 
-    private var statusBarStyleDescription: String {
-        "\(sessionStore.statusBarStyle.detailText) 仅影响状态栏图标，不影响完成提醒方式。"
+    private var nineGridAnimationIntervalBinding: Binding<Double> {
+        Binding(
+            get: { sessionStore.nineGridAnimationInterval },
+            set: { newValue in
+                sessionStore.setNineGridAnimationInterval(newValue)
+            }
+        )
+    }
+
+    private var nineGridAnimationDescription: String {
+        "当前 \(formatInterval(sessionStore.nineGridAnimationInterval)) 秒/格，可在 \(formatInterval(SessionStore.minNineGridAnimationInterval)) 到 \(formatInterval(SessionStore.maxNineGridAnimationInterval)) 秒之间调整。"
     }
 
     private func applyReminderStyle(_ style: ReminderStyle) async {
@@ -388,6 +409,10 @@ private struct HookSettingsView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func formatInterval(_ value: Double) -> String {
+        String(format: "%.2f", value)
     }
 }
 
@@ -547,6 +572,9 @@ struct ProjectSection: View {
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                 Spacer(minLength: 8)
+                Text(formattedTPSLabel(group.averageTPS()))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
                 Text(group.aggregateStatus.label)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
@@ -558,4 +586,17 @@ struct ProjectSection: View {
             Divider().opacity(0.6)
         }
     }
+}
+
+private func formattedTPS(_ value: Double?) -> String {
+    guard let value else { return "采样中" }
+    if value >= 10 {
+        return String(format: "%.1f", value)
+    }
+    return String(format: "%.2f", value)
+}
+
+private func formattedTPSLabel(_ value: Double?) -> String {
+    guard value != nil else { return "采样中" }
+    return "\(formattedTPS(value)) TPS"
 }

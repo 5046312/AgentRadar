@@ -35,41 +35,6 @@ enum ReminderStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum StatusBarStyle: String, Codable, CaseIterable, Identifiable {
-    case defaultDot
-    case nineGrid
-    case signalBars
-    case orbitRing
-    case tripleDots
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .defaultDot: return "默认圆点"
-        case .nineGrid: return "九宫格"
-        case .signalBars: return "信号柱"
-        case .orbitRing: return "环形轨道"
-        case .tripleDots: return "三点追踪"
-        }
-    }
-
-    var detailText: String {
-        switch self {
-        case .defaultDot:
-            return "当前绿色圆点样式。运行中做呼吸闪烁。"
-        case .nineGrid:
-            return "3x3 方格。运行中从左上第 0 格开始逐个闪烁。"
-        case .signalBars:
-            return "四段柱形波。运行中按波峰顺序流动。"
-        case .orbitRing:
-            return "八点环形。运行中沿圆环顺时针轮转。"
-        case .tripleDots:
-            return "三点横向追踪。运行中按顺序左右流动。"
-        }
-    }
-}
-
 enum SessionStatus: String, Codable {
     case running
     case waiting
@@ -83,14 +48,14 @@ struct Session: Identifiable, Equatable {
     var runtime: RuntimeKind
     var projectPath: String
     var projectName: String
-    var gitBranch: String?
     var status: SessionStatus
     var lastActivity: Date
     var lastEventTimestamp: Date
     var activeStartedAt: Date?
-    var currentTool: String?
-    var taskTitle: String?
-    var lastAssistantText: String?
+    var activeStartedTokenTotal: Int?
+    var tpsSampleTokenTotal: Int?
+    var tpsSampleTimestamp: Date?
+    var currentTPS: Double?
     var inputTokens: Int
     var outputTokens: Int
     var cacheReadTokens: Int

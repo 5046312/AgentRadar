@@ -6,16 +6,24 @@ English | [简体中文](README.zh-CN.md)
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar is a native macOS menu bar app for watching multiple Claude Code and Codex sessions at a glance.
+AgentRadar is a native macOS menu bar monitor for Claude Code and Codex project status.
 
 ## Features
 
-- Traffic-light status in the menu bar: running, waiting, completed, error, idle.
-- Active-session badge count.
-- Popover with project name, git branch, current tool, token usage, and recent activity.
-- Reads `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/*.jsonl`.
-- Hook event source at `~/.agentradar/events.jsonl`.
+- Fixed 3x3 menu bar indicator with active-task badge.
+- Running animation lights cells cumulatively, then clears and restarts.
+- Each newly lit cell is colored by TPS trend for that interval: green for faster, yellow for slight/no drop, red for large drop.
+- Popover shows runtime tabs, all-project average TPS, project-level TPS, and project-level status.
+- Completion and failure reminders via status bar bubble or system notification.
+- In-app hook installer with diff preview before writing.
 - Native Swift/AppKit/SwiftUI app with no third-party runtime dependencies.
+
+## Status Source
+
+- Claude reads `~/.claude/projects/**/*.jsonl` and uses hooks for more reliable waiting/completion states.
+- Codex status depends on hooks only. JSONL files only fill project and token details.
+- Hook events are appended to `~/.agentradar/events.jsonl`.
+- Internal Codex memory paths and root-level internal tasks are ignored so they do not appear as user projects.
 
 ## Requirements
 
@@ -34,15 +42,31 @@ open ./AgentRadar.app
 
 ## Install Hooks
 
-Codex status depends on hooks. Hooks also make Claude waiting and completed states more reliable:
+Open AgentRadar, click the gear button, then choose **Install Hooks**. The app shows a diff preview first; after confirmation it writes directly without backup files.
 
-Open AgentRadar and use the gear button in the popover to install hooks. In-app install shows a diff preview before writing. You can also keep using the CLI wrapper:
+You can also use the CLI wrapper:
 
 ```bash
 ./install-hooks.sh
 ```
 
-The install path is handled natively by AgentRadar and does not require `jq`. It directly updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json` without creating backup files. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
+The installer is implemented natively and does not require `jq`. It updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`.
+
+Codex hooks installed by AgentRadar:
+
+- `UserPromptSubmit`
+- `PermissionRequest`
+- `PreToolUse`
+- `PostToolUse`
+- `Stop`
+
+Restart current Claude/Codex sessions after installing hooks. Codex may ask you to review and trust the hook on first restart.
+
+## Settings
+
+- Reminder style: status bar bubble or system notification.
+- Sound: toggle completion sound.
+- Nine-grid speed: adjustable between `0.18` and `0.54` seconds per cell.
 
 ## Package DMG
 
@@ -72,7 +96,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-Hook install no longer creates automatic backups. Restore config files manually if you need to roll back.
+Hook install does not create automatic backups. Restore config files manually if you need to roll back.
 
 ## License
 

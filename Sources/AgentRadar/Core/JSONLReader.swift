@@ -2,17 +2,11 @@ import Foundation
 
 struct JSONLEntrySummary {
     let timestamp: Date
-    let role: String?
-    let toolName: String?
-    let userText: String?
-    let assistantText: String?
     let inputTokens: Int
     let outputTokens: Int
     let cacheReadTokens: Int
     let totalTokens: Int?
-    let gitBranch: String?
     let cwd: String?
-    let sessionId: String?
 }
 
 enum CodexTurnOutcome {
@@ -43,56 +37,68 @@ enum JSONLReader {
         return (lines, newOffset)
     }
 
+    static func readRecentLines(from url: URL, maxBytes: UInt64) -> (lines: [Data], newOffset: UInt64) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return ([], 0)
+        }
+        defer { try? handle.close() }
+
+        let fileSize: UInt64
+        do {
+            fileSize = try handle.seekToEnd()
+        } catch {
+            return ([], 0)
+        }
+
+        let startOffset = fileSize > maxBytes ? fileSize - maxBytes : 0
+        var shouldDropFirstLine = false
+        if startOffset > 0 {
+            do {
+                try handle.seek(toOffset: startOffset - 1)
+                let previousByte = try handle.read(upToCount: 1)
+                shouldDropFirstLine = previousByte?.first != 0x0A
+            } catch {
+                shouldDropFirstLine = true
+            }
+        }
+
+        do {
+            try handle.seek(toOffset: startOffset)
+        } catch {
+            return ([], fileSize)
+        }
+        guard let data = try? handle.readToEnd(), !data.isEmpty else {
+            return ([], fileSize)
+        }
+
+        var lines = completeLines(in: data).lines
+        if shouldDropFirstLine, !lines.isEmpty {
+            // 尾读可能从一行中间开始，丢掉半截 JSON，避免启动阶段解码失败刷无效工作。
+            lines.removeFirst()
+        }
+        return (lines, fileSize)
+    }
+
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
         }
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let cwd = obj["cwd"] as? String
-        let gitBranch = obj["gitBranch"] as? String
-        let sessionId = obj["sessionId"] as? String
 
         let message = obj["message"] as? [String: Any]
-        let role = message?["role"] as? String
-
-        var toolName: String?
-        var assistantText: String?
-
-        if let content = message?["content"] as? [[String: Any]] {
-            for item in content.reversed() {
-                if let type = item["type"] as? String {
-                    if type == "tool_use", toolName == nil {
-                        toolName = item["name"] as? String
-                    }
-                    if type == "text", assistantText == nil {
-                        assistantText = item["text"] as? String
-                    }
-                }
-            }
-        } else if let textContent = message?["content"] as? String {
-            assistantText = textContent
-        }
-
         let usage = message?["usage"] as? [String: Any]
         let inputTokens = (usage?["input_tokens"] as? Int) ?? 0
         let outputTokens = (usage?["output_tokens"] as? Int) ?? 0
         let cacheRead = (usage?["cache_read_input_tokens"] as? Int) ?? 0
 
-        let text = assistantText?.trimmingCharacters(in: .whitespacesAndNewlines)
-
         return JSONLEntrySummary(
             timestamp: timestamp,
-            role: role,
-            toolName: toolName,
-            userText: role == "user" ? text : nil,
-            assistantText: role == "assistant" ? text : nil,
             inputTokens: inputTokens,
             outputTokens: outputTokens,
             cacheReadTokens: cacheRead,
             totalTokens: nil,
-            gitBranch: gitBranch,
-            cwd: cwd,
-            sessionId: sessionId
+            cwd: cwd
         )
     }
 
@@ -100,26 +106,19 @@ enum JSONLReader {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
         }
-        // Codex 状态只信 hook；JSONL 只补项目、文本、工具和 token，避免回到文件增长推断。
+        // Codex 状态只信 hook；JSONL 只补项目和 token，避免回到文件增长推断。
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let type = obj["type"] as? String
         let payload = obj["payload"] as? [String: Any]
 
-        var role: String?
-        var toolName: String?
-        var userText: String?
-        var assistantText: String?
         var inputTokens = 0
         var outputTokens = 0
         var cacheReadTokens = 0
         var totalTokens: Int?
         var cwd = payload?["cwd"] as? String
-        var sessionId = payload?["id"] as? String
 
         if type == "event_msg", let eventType = payload?["type"] as? String {
             switch eventType {
-            case "task_complete":
-                assistantText = payload?["last_agent_message"] as? String
             case "token_count":
                 if let usage = (payload?["info"] as? [String: Any])?["total_token_usage"] as? [String: Any] {
                     inputTokens = int(usage["input_tokens"])
@@ -127,52 +126,22 @@ enum JSONLReader {
                     cacheReadTokens = int(usage["cached_input_tokens"])
                     totalTokens = int(usage["total_tokens"])
                 }
-            case "agent_message":
-                role = "assistant"
-                assistantText = payload?["message"] as? String
-            case "user_message":
-                role = "user"
-                userText = payload?["message"] as? String
             default:
                 break
-            }
-        }
-
-        if type == "response_item", let itemType = payload?["type"] as? String {
-            if itemType == "function_call" {
-                toolName = payload?["name"] as? String
-            }
-            if itemType == "message" {
-                role = payload?["role"] as? String
-                let text = textContent(from: payload?["content"])
-                if role == "user" {
-                    userText = text
-                } else if role == "assistant" {
-                    assistantText = text
-                }
             }
         }
 
         if type == "turn_context" {
             cwd = payload?["cwd"] as? String
         }
-        if sessionId == nil {
-            sessionId = obj["session_id"] as? String
-        }
 
         return JSONLEntrySummary(
             timestamp: timestamp,
-            role: role,
-            toolName: toolName,
-            userText: userText?.trimmingCharacters(in: .whitespacesAndNewlines),
-            assistantText: assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
             inputTokens: inputTokens,
             outputTokens: outputTokens,
             cacheReadTokens: cacheReadTokens,
             totalTokens: totalTokens,
-            gitBranch: nil,
-            cwd: cwd,
-            sessionId: sessionId
+            cwd: cwd
         )
     }
 
@@ -207,18 +176,6 @@ enum JSONLReader {
         return .pending
     }
 
-    private static func textContent(from value: Any?) -> String? {
-        if let text = value as? String {
-            return text
-        }
-        guard let content = value as? [[String: Any]] else {
-            return nil
-        }
-        return content.compactMap { item in
-            item["text"] as? String
-        }.joined(separator: "\n")
-    }
-
     private static func int(_ value: Any?) -> Int {
         if let intValue = value as? Int { return intValue }
         if let doubleValue = value as? Double { return Int(doubleValue) }
@@ -244,10 +201,19 @@ enum JSONLReader {
 
     private static func parseTimestamp(_ s: String?) -> Date? {
         guard let s = s else { return nil }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) { return d }
-        f.formatOptions = [.withInternetDateTime]
-        return f.date(from: s)
+        if let d = fractionalTimestampFormatter.date(from: s) { return d }
+        return internetTimestampFormatter.date(from: s)
     }
+
+    private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let internetTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }

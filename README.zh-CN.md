@@ -6,16 +6,24 @@
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar 是一个 macOS 菜单栏工具，用红绿灯状态监控多个 Claude Code 和 Codex 会话。
+AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 Codex 的项目级任务状态。
 
 ## 功能
 
-- 状态栏红绿灯：运行、等待、完成、错误、空闲。
-- 活跃任务数字角标。
-- Popover 展示项目名、git 分支、当前工具、token 使用量、最近活动时间。
-- 读取 `~/.claude/projects/**/*.jsonl` 和 `~/.codex/sessions/**/*.jsonl`。
-- hooks 事件源：`~/.agentradar/events.jsonl`。
+- 状态栏固定使用 3x3 九宫格图标，并显示运行中任务数字角标。
+- 运行中按格子逐个累积点亮，满 9 格后整体熄灭并重新开始。
+- 每次新点亮格子的颜色由该间隔内 TPS 变化决定：上升绿色，小幅或无下降黄色，大幅下降红色。
+- 弹窗展示 runtime 切换、所有项目平均 TPS、项目级 TPS、项目级状态。
+- 任务完成和失败支持状态栏气泡或系统消息提醒。
+- 内置 hooks 安装器，写入前先展示 diff 预览。
 - 原生 Swift/AppKit/SwiftUI，无第三方运行依赖。
+
+## 状态来源
+
+- Claude 读取 `~/.claude/projects/**/*.jsonl`，并通过 hooks 提高等待、完成状态的准确性。
+- Codex 状态只依赖 hooks；JSONL 只用于补充项目和 token 信息。
+- hooks 事件统一追加到 `~/.agentradar/events.jsonl`。
+- Codex 内部 memory 路径和根目录内部任务会被忽略，不显示成用户项目。
 
 ## 系统要求
 
@@ -32,17 +40,33 @@ open ./AgentRadar.app
 
 `build.sh` 会执行 SwiftPM release 构建，并生成 `AgentRadar.app`。
 
-## 安装 hooks
+## 安装 Hooks
 
-Codex 状态依赖 hooks；Claude 的等待、完成等状态也通过 hooks 更可靠：
+打开 AgentRadar，点击齿轮按钮，然后选择“安装 Hooks”。应用会先展示 diff 预览，确认后直接写入，不生成备份文件。
 
-先打开 AgentRadar，点弹窗顶部齿轮按钮里的“安装 Hooks”。应用内会先展示 diff 预览，确认后再写入；也可以继续用命令行：
+也可以继续使用命令行包装脚本：
 
 ```bash
 ./install-hooks.sh
 ```
 
-安装逻辑由 AgentRadar 原生执行，不依赖 `jq`。它会直接更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`，不再生成备份。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
+安装逻辑由 AgentRadar 原生实现，不依赖 `jq`。它会更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。
+
+AgentRadar 安装的 Codex hooks：
+
+- `UserPromptSubmit`
+- `PermissionRequest`
+- `PreToolUse`
+- `PostToolUse`
+- `Stop`
+
+安装后需要重启当前 Claude/Codex 会话。Codex 首次重启时可能要求 review 并信任 hook。
+
+## 设置
+
+- 提醒方式：状态栏气泡或系统消息。
+- 音效：可开关任务完成音效。
+- 九宫格速度：可在 `0.18` 到 `0.54` 秒/格之间调整。
 
 ## 打包 DMG
 
@@ -72,7 +96,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-当前 hooks 安装不会自动生成备份，如需回退请自行恢复对应配置文件。
+hooks 安装不会自动生成备份，如需回退请自行恢复对应配置文件。
 
 ## 许可
 

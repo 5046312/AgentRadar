@@ -75,6 +75,9 @@ final class HookEventReader {
 
     private func apply(_ event: HookEvent) {
         let runtime = event.runtime ?? .claude
+        if shouldIgnore(event, runtime: runtime) {
+            return
+        }
         let eventTime = Date(timeIntervalSince1970: event.ts)
         switch event.event {
         case "Stop", "SubagentStop":
@@ -97,6 +100,20 @@ final class HookEventReader {
         default:
             break
         }
+    }
+
+    private func shouldIgnore(_ event: HookEvent, runtime: RuntimeKind) -> Bool {
+        guard runtime == .codex else {
+            return false
+        }
+
+        if let cwd = event.cwd?.trimmingCharacters(in: .whitespacesAndNewlines), cwd == "/" {
+            // Codex 会起一些根目录下的内部分类任务，例如 exclude；它们不对应真实项目。
+            return true
+        }
+
+        // 真实 Codex 会话会带 transcript_path；没有 transcript 的通常是 suggestions/exclude/memory 之类后台任务。
+        return (event.transcript_path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     private func applyCodexStop(_ event: HookEvent, runtime: RuntimeKind, eventTime: Date) {
@@ -137,6 +154,32 @@ final class HookEventReader {
     }
 
     private func applyStatus(_ status: SessionStatus, event: HookEvent, runtime: RuntimeKind, eventTime: Date, flashUntil: Date? = nil) {
-        store.setHookStatus(runtime: runtime, rawSessionId: event.session_id, status: status, eventTime: eventTime, cwd: event.cwd, flashUntil: flashUntil)
+        store.setHookStatus(
+            runtime: runtime,
+            rawSessionId: rawSessionId(for: event, runtime: runtime),
+            status: status,
+            eventTime: eventTime,
+            cwd: event.cwd,
+            flashUntil: flashUntil
+        )
+    }
+
+    private func rawSessionId(for event: HookEvent, runtime: RuntimeKind) -> String? {
+        if let sessionId = event.session_id?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionId.isEmpty {
+            return sessionId
+        }
+
+        guard
+            runtime == .codex,
+            let transcriptPath = event.transcript_path?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !transcriptPath.isEmpty
+        else {
+            return nil
+        }
+
+        let fileName = (URL(fileURLWithPath: transcriptPath).lastPathComponent as NSString).deletingPathExtension
+        let suffix = String(fileName.suffix(36))
+        // Codex hook 有时只带 transcript_path；取 rollout 文件名末尾 UUID，才能在回车后立即命中同一会话。
+        return UUID(uuidString: suffix) == nil ? fileName : suffix
     }
 }

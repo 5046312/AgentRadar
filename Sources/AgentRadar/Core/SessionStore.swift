@@ -5,7 +5,6 @@ import UserNotifications
 struct ProjectGroup: Identifiable {
     let id: String
     let name: String
-    let path: String
     var sessions: [Session]
 
     var aggregateStatus: SessionStatus {
@@ -16,6 +15,27 @@ struct ProjectGroup: Identifiable {
         if statuses.contains(.completed) { return .completed }
         return .idle
     }
+
+    func averageTPS(now: Date = Date()) -> Double? {
+        let samples = sessions.compactMap { session -> Double? in
+            let totalTokens = max(
+                session.lastTokenTotal,
+                session.inputTokens + session.outputTokens + session.cacheReadTokens
+            )
+
+            if session.status == .running {
+                return session.currentTPS
+            }
+
+            guard let duration = session.lastDuration, duration > 0, totalTokens > 0 else {
+                return nil
+            }
+            return Double(totalTokens) / duration
+        }
+
+        guard !samples.isEmpty else { return nil }
+        return samples.reduce(0, +) / Double(samples.count)
+    }
 }
 
 @MainActor
@@ -23,8 +43,12 @@ final class SessionStore: ObservableObject {
     private enum DefaultsKey {
         static let soundEnabled = "soundEnabled"
         static let reminderStyle = "reminderStyle"
-        static let statusBarStyle = "statusBarStyle"
+        static let nineGridAnimationInterval = "nineGridAnimationInterval"
     }
+
+    nonisolated static let minNineGridAnimationInterval: Double = 0.18
+    nonisolated static let maxNineGridAnimationInterval: Double = 0.54
+    nonisolated static let defaultNineGridAnimationInterval: Double = 0.30
 
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
@@ -35,23 +59,14 @@ final class SessionStore: ObservableObject {
         let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
         return ReminderStyle(rawValue: rawValue ?? "") ?? .statusBarBubble
     }()
-    @Published var statusBarStyle: StatusBarStyle = {
-        let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.statusBarStyle)
-        return StatusBarStyle(rawValue: rawValue ?? "") ?? .defaultDot
-    }()
+    @Published var nineGridAnimationInterval: Double = SessionStore.clampedNineGridAnimationInterval(SessionStore.loadDouble(
+        forKey: DefaultsKey.nineGridAnimationInterval,
+        fallback: SessionStore.defaultNineGridAnimationInterval
+    ))
 
     private var trackedSessions: [Session] {
         // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
         sessions.values.filter { !PathUtils.isIgnoredProjectPath($0.projectPath) }
-    }
-
-    var sortedSessions: [Session] {
-        trackedSessions.sorted { lhs, rhs in
-            if lhs.status.priority != rhs.status.priority {
-                return lhs.status.priority < rhs.status.priority
-            }
-            return lhs.lastActivity > rhs.lastActivity
-        }
     }
 
     var projectGroups: [ProjectGroup] {
@@ -63,7 +78,7 @@ final class SessionStore: ObservableObject {
         for s in trackedSessions {
             if let runtime, s.runtime != runtime { continue }
             if groups[s.projectPath] == nil {
-                groups[s.projectPath] = ProjectGroup(id: s.projectPath, name: s.projectName, path: s.projectPath, sessions: [])
+                groups[s.projectPath] = ProjectGroup(id: s.projectPath, name: s.projectName, sessions: [])
             }
             groups[s.projectPath]?.sessions.append(s)
         }
@@ -107,13 +122,34 @@ final class SessionStore: ObservableObject {
         trackedSessions.filter { $0.status == .running }.count
     }
 
+    func allProjectsAverageTPS(now: Date = Date()) -> Double? {
+        averageTPS(for: projectGroups, now: now)
+    }
+
+    func runningTokenDeltaTotal() -> Int {
+        trackedSessions.reduce(0) { total, session in
+            guard session.status == .running else { return total }
+            let tokenTotal = totalTokens(for: session)
+            let startedTokens = session.activeStartedTokenTotal ?? 0
+            return total + max(0, tokenTotal - startedTokens)
+        }
+    }
+
     func upsert(_ session: Session) {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
-        let oldStatus = sessions[session.id]?.status
-        sessions[session.id] = session
+        var nextSession = session
+        if nextSession.status == .running, nextSession.activeStartedTokenTotal == nil {
+            let tokenTotal = totalTokens(for: nextSession)
+            nextSession.activeStartedTokenTotal = tokenTotal
+            nextSession.tpsSampleTokenTotal = tokenTotal
+            nextSession.tpsSampleTimestamp = nextSession.lastEventTimestamp
+            nextSession.currentTPS = nil
+        }
+        let oldStatus = sessions[nextSession.id]?.status
+        sessions[nextSession.id] = nextSession
         version &+= 1
-        if session.status == .completed && oldStatus != .completed {
-            publishCompletion(session)
+        if nextSession.status == .completed && oldStatus != .completed {
+            publishCompletion(nextSession)
         }
     }
 
@@ -141,6 +177,10 @@ final class SessionStore: ObservableObject {
         s.lastActivity = max(s.lastActivity, eventTime)
         if status == .running, oldStatus != .running {
             s.activeStartedAt = eventTime
+            s.activeStartedTokenTotal = totalTokens(for: s)
+            s.tpsSampleTokenTotal = totalTokens(for: s)
+            s.tpsSampleTimestamp = eventTime
+            s.currentTPS = nil
             s.lastDuration = nil
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
@@ -204,14 +244,14 @@ final class SessionStore: ObservableObject {
             runtime: runtime,
             projectPath: projectPath,
             projectName: PathUtils.projectNameFromPath(projectPath),
-            gitBranch: nil,
             status: .idle,
             lastActivity: eventTime,
             lastEventTimestamp: eventTime,
             activeStartedAt: nil,
-            currentTool: nil,
-            taskTitle: nil,
-            lastAssistantText: nil,
+            activeStartedTokenTotal: nil,
+            tpsSampleTokenTotal: nil,
+            tpsSampleTimestamp: nil,
+            currentTPS: nil,
             inputTokens: 0,
             outputTokens: 0,
             cacheReadTokens: 0,
@@ -255,9 +295,10 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.reminderStyle)
     }
 
-    func setStatusBarStyle(_ style: StatusBarStyle) {
-        statusBarStyle = style
-        UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.statusBarStyle)
+    func setNineGridAnimationInterval(_ value: Double) {
+        let nextValue = SessionStore.clampedNineGridAnimationInterval(value)
+        nineGridAnimationInterval = nextValue
+        UserDefaults.standard.set(nextValue, forKey: DefaultsKey.nineGridAnimationInterval)
     }
 
     func requestSystemNotificationAuthorization() async -> Bool {
@@ -318,6 +359,28 @@ final class SessionStore: ObservableObject {
     private func publishFailure(_ session: Session) {
         // 失败提示只跟着 error 跃迁走，避免 Stop 与后续展示字段补写重复提醒。
         latestFailure = FailureNotice(session: session)
+    }
+
+    private func totalTokens(for session: Session) -> Int {
+        max(
+            session.lastTokenTotal,
+            session.inputTokens + session.outputTokens + session.cacheReadTokens
+        )
+    }
+
+    nonisolated private static func loadDouble(forKey key: String, fallback: Double) -> Double {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+        return UserDefaults.standard.double(forKey: key)
+    }
+
+    nonisolated private static func clampedNineGridAnimationInterval(_ value: Double) -> Double {
+        min(maxNineGridAnimationInterval, max(minNineGridAnimationInterval, value))
+    }
+
+    private func averageTPS(for groups: [ProjectGroup], now: Date) -> Double? {
+        let samples = groups.compactMap { $0.averageTPS(now: now) }
+        guard !samples.isEmpty else { return nil }
+        return samples.reduce(0, +) / Double(samples.count)
     }
 }
 

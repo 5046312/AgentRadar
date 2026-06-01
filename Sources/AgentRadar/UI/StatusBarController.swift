@@ -12,12 +12,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var eventMonitor: Any?
     private var resignObserver: Any?
     private var versionCancellable: AnyCancellable?
-    private var styleCancellable: AnyCancellable?
+    private var speedCancellable: AnyCancellable?
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var completionCloseTimer: Timer?
     private var statusAnimationTimer: Timer?
-    private var statusAnimationStyle: StatusBarStyle?
+    private var activeAnimationInterval: TimeInterval?
+    private var lastAnimationTokenSample: (tokens: Int, timestamp: Date)?
+    private var lastIntervalTPS: Double?
+    private var litCellColors: [NSColor] = Array(repeating: .systemGreen, count: 9)
     private var statusAnimationStep = 0
 
     init(store: SessionStore) {
@@ -48,7 +51,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         versionCancellable = store.$version.sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        styleCancellable = store.$statusBarStyle.sink { [weak self] _ in
+        speedCancellable = store.$nineGridAnimationInterval.sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
         completionCancellable = store.$latestCompletion.compactMap { $0 }.sink { [weak self] notice in
@@ -134,21 +137,32 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard store.aggregateStatus == .running else {
             statusAnimationTimer?.invalidate()
             statusAnimationTimer = nil
-            statusAnimationStyle = nil
+            activeAnimationInterval = nil
+            lastAnimationTokenSample = nil
+            lastIntervalTPS = nil
+            litCellColors = Array(repeating: .systemGreen, count: 9)
             statusAnimationStep = 0
             return
         }
-        let style = store.statusBarStyle
-        guard statusAnimationTimer == nil || statusAnimationStyle != style else { return }
+        let interval = store.nineGridAnimationInterval
+        let needsSpeedUpdate = activeAnimationInterval.map { abs($0 - interval) > 0.001 } ?? true
+        guard statusAnimationTimer == nil || needsSpeedUpdate else { return }
+        let wasAnimating = statusAnimationTimer != nil
         statusAnimationTimer?.invalidate()
-        statusAnimationStyle = style
-        statusAnimationStep = 0
-        // 不同图形节奏不同；切换样式时重建定时器，避免动画相位残留。
-        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: style.animationInterval, repeats: true) { [weak self] _ in
+        activeAnimationInterval = interval
+        if !wasAnimating {
+            lastAnimationTokenSample = (store.runningTokenDeltaTotal(), Date())
+            lastIntervalTPS = nil
+            litCellColors = Array(repeating: .systemGreen, count: 9)
+            statusAnimationStep = 0
+        }
+        // 只在用户调整九宫格速度时重建 Timer，避免普通状态刷新打断动画节奏。
+        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.statusAnimationStep += 1
+                self.advanceNineGridAnimation()
                 self.renderStatusItem()
+                self.updateStatusAnimation()
             }
         }
     }
@@ -174,21 +188,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func makeStatusImage() -> NSImage {
-        let size = store.statusBarStyle.canvasSize
+        let size = nineGridCanvasSize
         let image = NSImage(size: size)
         image.lockFocus()
-        switch store.statusBarStyle {
-        case .defaultDot:
-            drawDefaultDot(in: NSRect(origin: .zero, size: size))
-        case .nineGrid:
-            drawNineGrid(in: NSRect(origin: .zero, size: size))
-        case .signalBars:
-            drawSignalBars(in: NSRect(origin: .zero, size: size))
-        case .orbitRing:
-            drawOrbitRing(in: NSRect(origin: .zero, size: size))
-        case .tripleDots:
-            drawTripleDots(in: NSRect(origin: .zero, size: size))
-        }
+        drawNineGrid(in: NSRect(origin: .zero, size: size))
         image.unlockFocus()
         image.isTemplate = false
         return image
@@ -205,153 +208,89 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func drawDefaultDot(in rect: NSRect) {
-        let alpha: CGFloat
-        switch store.aggregateStatus {
-        case .running:
-            alpha = statusAnimationStep.isMultiple(of: 2) ? 1.0 : 0.35
-        case .error:
-            alpha = 1.0
-        case .idle, .waiting, .completed:
-            alpha = 1.0
-        }
-        statusColor(alpha: alpha).setFill()
-        NSBezierPath(ovalIn: rect).fill()
-    }
-
     private func drawNineGrid(in rect: NSRect) {
-        let cell: CGFloat = 3.5
-        let gap: CGFloat = 0.75
-        let activeIndex = statusAnimationStep % 9
+        let gap: CGFloat = 0.5
+        let cell = (rect.width - gap * 2) / 3
+        let corner = min(1.1, cell * 0.22)
+        let phase = statusAnimationStep % 10
 
         for index in 0..<9 {
             let row = index / 3
             let column = index % 3
             let x = CGFloat(column) * (cell + gap)
             let y = rect.height - cell - CGFloat(row) * (cell + gap)
-            let alpha: CGFloat
-
             switch store.aggregateStatus {
             case .running:
-                // 九宫格按左上到右下顺序轮转，和用户看到的“0 到 8”保持一致。
-                alpha = index == activeIndex ? 1.0 : 0.18
+                // 运行中按左上到右下逐个累积点亮，满格后整组熄灭再开始下一轮。
+                let litCount = phase == 9 ? 0 : phase + 1
+                let color = index < litCount
+                    ? litCellColors[index].withAlphaComponent(1.0)
+                    : NSColor(white: 0.5, alpha: 0.18)
+                color.setFill()
             case .error:
-                alpha = 1.0
+                statusColor(alpha: 1.0).setFill()
             case .idle, .waiting, .completed:
-                alpha = 1.0
+                statusColor(alpha: 1.0).setFill()
             }
 
-            statusColor(alpha: alpha).setFill()
             NSBezierPath(
                 roundedRect: NSRect(x: x, y: y, width: cell, height: cell),
-                xRadius: 0.8,
-                yRadius: 0.8
-            ).fill()
-        }
-    }
-
-    private func drawSignalBars(in rect: NSRect) {
-        let barWidth: CGFloat = 2.5
-        let gap: CGFloat = 2.0 / 3.0
-        let corner: CGFloat = 1
-        let heights: [CGFloat]
-
-        switch store.aggregateStatus {
-        case .running:
-            let frames: [[CGFloat]] = [
-                [4, 7, 10, 7],
-                [6, 10, 7, 4],
-                [10, 7, 4, 6],
-                [7, 4, 6, 10]
-            ]
-            heights = frames[statusAnimationStep % frames.count]
-        case .error:
-            heights = [10, 10, 10, 10]
-        case .idle, .waiting, .completed:
-            heights = [4, 6, 8, 10]
-        }
-
-        for index in 0..<heights.count {
-            let x = rect.minX + CGFloat(index) * (barWidth + gap)
-            let height = heights[index]
-            statusColor(alpha: 1.0).setFill()
-            NSBezierPath(
-                roundedRect: NSRect(x: x, y: rect.minY, width: barWidth, height: height),
                 xRadius: corner,
                 yRadius: corner
             ).fill()
         }
     }
 
-    private func drawOrbitRing(in rect: NSRect) {
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let orbitRadius: CGFloat = 4.1
-        let dotSize: CGFloat = 2.8
-        let activeIndex = statusAnimationStep % 8
+    private func advanceNineGridAnimation() {
+        let nextStep = statusAnimationStep + 1
+        let phase = nextStep % 10
 
-        for index in 0..<8 {
-            let angle = (CGFloat.pi * 2 / 8) * CGFloat(index) - .pi / 2
-            let point = CGPoint(
-                x: center.x + cos(angle) * orbitRadius,
-                y: center.y + sin(angle) * orbitRadius
-            )
-            let alpha: CGFloat
-
-            switch store.aggregateStatus {
-            case .running:
-                if index == activeIndex {
-                    alpha = 1.0
-                } else if index == (activeIndex + 7) % 8 {
-                    alpha = 0.45
-                } else {
-                    alpha = 0.18
-                }
-            case .error:
-                alpha = 1.0
-            case .idle, .waiting, .completed:
-                alpha = 1.0
-            }
-
-            statusColor(alpha: alpha).setFill()
-            NSBezierPath(
-                ovalIn: NSRect(
-                    x: point.x - dotSize / 2,
-                    y: point.y - dotSize / 2,
-                    width: dotSize,
-                    height: dotSize
-                )
-            ).fill()
+        if phase == 9 {
+            // 第 10 帧是整组熄灭，不产生“新亮起”颜色样本。
+            statusAnimationStep = nextStep
+            return
         }
+
+        if phase == 0 {
+            litCellColors = Array(repeating: .systemGreen, count: 9)
+        }
+
+        litCellColors[phase] = nextRunningStepColor()
+        statusAnimationStep = nextStep
     }
 
-    private func drawTripleDots(in rect: NSRect) {
-        let dotSize: CGFloat = 3.8
-        let gap: CGFloat = 1.3
-        let activeIndex = statusAnimationStep % 3
+    private func nextRunningStepColor() -> NSColor {
+        let now = Date()
+        let currentTokens = store.runningTokenDeltaTotal()
 
-        for index in 0..<3 {
-            let x = CGFloat(index) * (dotSize + gap)
-            let alpha: CGFloat
-
-            switch store.aggregateStatus {
-            case .running:
-                alpha = index == activeIndex ? 1.0 : 0.22
-            case .error:
-                alpha = 1.0
-            case .idle, .waiting, .completed:
-                alpha = 1.0
-            }
-
-            statusColor(alpha: alpha).setFill()
-            NSBezierPath(
-                ovalIn: NSRect(
-                    x: x,
-                    y: (rect.height - dotSize) / 2,
-                    width: dotSize,
-                    height: dotSize
-                )
-            ).fill()
+        guard
+            let previousSample = lastAnimationTokenSample,
+            now.timeIntervalSince(previousSample.timestamp) > 0
+        else {
+            lastAnimationTokenSample = (currentTokens, now)
+            return .systemGreen
         }
+
+        let elapsed = now.timeIntervalSince(previousSample.timestamp)
+        let tokenDelta = max(0, currentTokens - previousSample.tokens)
+        let currentTPS = Double(tokenDelta) / elapsed
+        defer {
+            lastAnimationTokenSample = (currentTokens, now)
+            lastIntervalTPS = currentTPS
+        }
+
+        guard let previousTPS = lastIntervalTPS else {
+            return .systemGreen
+        }
+        guard previousTPS > 0 else {
+            return currentTPS > 0 ? .systemGreen : .systemYellow
+        }
+
+        // 颜色按相邻两次亮起之间的区间 TPS 变化决定：明显下滑红色，小幅下降黄色，上升绿色。
+        let changeRatio = (currentTPS - previousTPS) / previousTPS
+        if changeRatio > 0 { return .systemGreen }
+        if changeRatio <= -0.20 { return .systemRed }
+        return .systemYellow
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
@@ -434,34 +373,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             }
         }
     }
-}
-
-private extension StatusBarStyle {
-    var canvasSize: NSSize {
-        switch self {
-        case .defaultDot:
-            return NSSize(width: 10, height: 10)
-        case .nineGrid, .signalBars, .orbitRing:
-            return NSSize(width: 12, height: 12)
-        case .tripleDots:
-            return NSSize(width: 14, height: 10)
-        }
+    private var nineGridCanvasSize: NSSize {
+        NSSize(width: 13, height: 13)
     }
 
-    var animationInterval: TimeInterval {
-        switch self {
-        case .defaultDot:
-            return 0.7
-        case .nineGrid:
-            return 0.18
-        case .signalBars:
-            return 0.22
-        case .orbitRing:
-            return 0.14
-        case .tripleDots:
-            return 0.24
-        }
-    }
 }
 
 struct CompletionNoticeView: View {

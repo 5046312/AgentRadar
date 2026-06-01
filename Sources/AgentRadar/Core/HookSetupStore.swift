@@ -138,11 +138,14 @@ enum HookConfigurationManager {
     ]
 
     private static let codexEvents = [
-        "SessionStart",
+        "UserPromptSubmit",
         "Stop",
         "PermissionRequest",
         "PreToolUse",
         "PostToolUse"
+    ]
+    private static let legacyCodexEvents = [
+        "SessionStart"
     ]
 
     static func inspect(executablePath: String) -> HookSetupState {
@@ -182,6 +185,7 @@ enum HookConfigurationManager {
             at: PathUtils.codexHooksFile,
             runtime: .codex,
             events: codexEvents,
+            cleanupEvents: legacyCodexEvents,
             executablePath: executablePath
         ) {
             changes.append(change)
@@ -212,10 +216,22 @@ enum HookConfigurationManager {
         }
     }
 
-    private static func plannedHooksChange(at url: URL, runtime: RuntimeKind, events: [String], executablePath: String) throws -> HookFileChange? {
+    private static func plannedHooksChange(
+        at url: URL,
+        runtime: RuntimeKind,
+        events: [String],
+        cleanupEvents: [String] = [],
+        executablePath: String
+    ) throws -> HookFileChange? {
         let currentText = try loadTextIfExists(at: url)
         let currentRoot = try loadJSONObject(at: url)
-        let updatedRoot = updatedHooksRoot(from: currentRoot, runtime: runtime, events: events, executablePath: executablePath)
+        let updatedRoot = updatedHooksRoot(
+            from: currentRoot,
+            runtime: runtime,
+            events: events,
+            cleanupEvents: cleanupEvents,
+            executablePath: executablePath
+        )
 
         guard !jsonObjectsEqual(currentRoot, updatedRoot) else {
             return nil
@@ -228,8 +244,26 @@ enum HookConfigurationManager {
         )
     }
 
-    private static func updatedHooksRoot(from root: [String: Any], runtime: RuntimeKind, events: [String], executablePath: String) -> [String: Any] {
+    private static func updatedHooksRoot(
+        from root: [String: Any],
+        runtime: RuntimeKind,
+        events: [String],
+        cleanupEvents: [String] = [],
+        executablePath: String
+    ) -> [String: Any] {
         var root = root
+
+        for event in cleanupEvents where !events.contains(event) {
+            let currentEntries = hookEntries(from: root, runtime: runtime, event: event)
+            var entries = currentEntries
+            entries.removeAll { entry in
+                // 清掉旧版安装过但当前不再需要的 AgentRadar hook，避免继续产生无意义事件。
+                hasAgentRadarHook(entry, runtime: runtime, event: event)
+            }
+            if entries.count != currentEntries.count {
+                setHookEntries(entries, into: &root, runtime: runtime, event: event)
+            }
+        }
 
         for event in events {
             let command = hookCommand(runtime: runtime, event: event, executablePath: executablePath)
@@ -433,10 +467,18 @@ enum HookConfigurationManager {
         switch runtime {
         case .claude:
             // Claude 用户 settings.json 用直写格式，事件直接挂在顶层，不能再包一层 hooks。
-            root[event] = entries
+            if entries.isEmpty {
+                root.removeValue(forKey: event)
+            } else {
+                root[event] = entries
+            }
         case .codex:
             var hooks = root["hooks"] as? [String: Any] ?? [:]
-            hooks[event] = entries
+            if entries.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = entries
+            }
             root["hooks"] = hooks
         }
     }
