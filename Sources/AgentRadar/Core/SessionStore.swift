@@ -28,6 +28,7 @@ final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
     @Published private(set) var latestCompletion: CompletionNotice?
+    @Published private(set) var latestFailure: FailureNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
     @Published var reminderStyle: ReminderStyle = {
         let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
@@ -114,6 +115,9 @@ final class SessionStore: ObservableObject {
         if s.status == .completed && oldStatus != .completed {
             publishCompletion(s)
         }
+        if s.status == .error && oldStatus != .error {
+            publishFailure(s)
+        }
     }
 
     func setStatus(id: String, status: SessionStatus, eventTime: Date = Date(), flashUntil: Date? = nil) {
@@ -126,7 +130,7 @@ final class SessionStore: ObservableObject {
             s.activeStartedAt = eventTime
             s.lastDuration = nil
         }
-        if status == .completed, oldStatus != .completed, let startedAt = s.activeStartedAt {
+        if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
             s.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
         }
         if let f = flashUntil { s.completedFlashUntil = f }
@@ -134,6 +138,9 @@ final class SessionStore: ObservableObject {
         version &+= 1
         if status == .completed && oldStatus != .completed {
             publishCompletion(s)
+        }
+        if status == .error && oldStatus != .error {
+            publishFailure(s)
         }
     }
 
@@ -277,6 +284,11 @@ final class SessionStore: ObservableObject {
         // 完成提示和音效共用同一次状态跃迁，避免 JSONL 补写内容时重复弹出。
         latestCompletion = CompletionNotice(session: session)
         playCompletionSound()
+    }
+
+    private func publishFailure(_ session: Session) {
+        // 失败提示只跟着 error 跃迁走，避免 Stop 与后续展示字段补写重复提醒。
+        latestFailure = FailureNotice(session: session)
     }
 }
 

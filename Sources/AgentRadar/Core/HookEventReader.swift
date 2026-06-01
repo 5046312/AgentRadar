@@ -78,13 +78,54 @@ final class HookEventReader {
         let eventTime = Date(timeIntervalSince1970: event.ts)
         switch event.event {
         case "Stop", "SubagentStop":
-            applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+            if runtime == .codex {
+                applyCodexStop(event, runtime: runtime, eventTime: eventTime)
+            } else {
+                applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+            }
         case "Notification", "PermissionRequest":
             applyStatus(.waiting, event: event, runtime: runtime, eventTime: eventTime)
         case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse":
             applyStatus(.running, event: event, runtime: runtime, eventTime: eventTime)
         default:
             break
+        }
+    }
+
+    private func applyCodexStop(_ event: HookEvent, runtime: RuntimeKind, eventTime: Date) {
+        guard
+            let transcriptPath = event.transcript_path,
+            !transcriptPath.isEmpty,
+            let turnId = event.turn_id,
+            !turnId.isEmpty
+        else {
+            // 老版本 Stop 载荷没有 transcript/turn_id 时，只能退回旧行为，避免误报失败。
+            applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+            return
+        }
+
+        let transcriptURL = URL(fileURLWithPath: transcriptPath)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for attempt in 0..<6 {
+                switch JSONLReader.codexTurnOutcome(at: transcriptURL, turnId: turnId) {
+                case .completed:
+                    self.applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+                    return
+                case .interrupted:
+                    self.applyStatus(.idle, event: event, runtime: runtime, eventTime: eventTime)
+                    return
+                case .failed:
+                    self.applyStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
+                    return
+                case .pending:
+                    // Stop hook 可能比 transcript 最后一条 task_complete 更早落盘，短等几轮再判失败。
+                    if attempt < 5 {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                }
+            }
+            self.applyStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
         }
     }
 

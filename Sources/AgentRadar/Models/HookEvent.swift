@@ -7,4 +7,6 @@ struct HookEvent: Decodable {
     let runtime: RuntimeKind?
     let session_id: String?
     let cwd: String?
+    let turn_id: String?
+    let transcript_path: String?
 }

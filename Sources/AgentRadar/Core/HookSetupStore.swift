@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 struct HookSetupState {
     let claudeInstalled: Bool
@@ -609,10 +610,35 @@ enum HookEventRecorder {
         }
 
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        let handle = try FileHandle(forWritingTo: PathUtils.hookEventsFile)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        handle.write(data)
-        handle.write(Data([0x0A]))
+        var line = data
+        line.append(0x0A)
+
+        // Codex/Claude hooks 可能并发触发；这里必须把“整行 JSON + 换行”作为一个临界区写入，
+        // 否则 events.jsonl 会出现两条记录互相拼接，HookEventReader 就会直接解码失败。
+        let fd = open(PathUtils.hookEventsFile.path, O_WRONLY | O_APPEND)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        try writeAll(line, to: fd)
+    }
+
+    private static func writeAll(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < rawBuffer.count {
+                let result = write(fd, baseAddress.advanced(by: written), rawBuffer.count - written)
+                if result < 0 {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                written += result
+            }
+        }
     }
 }

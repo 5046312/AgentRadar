@@ -15,6 +15,13 @@ struct JSONLEntrySummary {
     let sessionId: String?
 }
 
+enum CodexTurnOutcome {
+    case completed
+    case interrupted
+    case failed
+    case pending
+}
+
 enum JSONLReader {
     static func readNewLines(from url: URL, startingAt offset: UInt64) -> (lines: [Data], newOffset: UInt64) {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
@@ -167,6 +174,37 @@ enum JSONLReader {
             cwd: cwd,
             sessionId: sessionId
         )
+    }
+
+    static func codexTurnOutcome(at url: URL, turnId: String) -> CodexTurnOutcome {
+        let readResult = readNewLines(from: url, startingAt: 0)
+        guard !readResult.lines.isEmpty else {
+            return .pending
+        }
+
+        for line in readResult.lines {
+            guard
+                let obj = try? JSONSerialization.jsonObject(with: line, options: []) as? [String: Any],
+                obj["type"] as? String == "event_msg",
+                let payload = obj["payload"] as? [String: Any],
+                payload["turn_id"] as? String == turnId,
+                let eventType = payload["type"] as? String
+            else {
+                continue
+            }
+
+            switch eventType {
+            case "task_complete":
+                return .completed
+            case "turn_aborted":
+                // interrupted 是用户主动打断；其他终止原因都按失败处理。
+                return (payload["reason"] as? String) == "interrupted" ? .interrupted : .failed
+            default:
+                continue
+            }
+        }
+
+        return .pending
     }
 
     private static func textContent(from value: Any?) -> String? {

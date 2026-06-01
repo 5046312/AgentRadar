@@ -73,7 +73,9 @@ final class TrafficLightView: NSView {
         switch currentStatus {
         case .running:
             dot.backgroundColor = NSColor.systemGreen.cgColor
-        case .idle, .error, .waiting, .completed:
+        case .error:
+            dot.backgroundColor = NSColor.systemRed.cgColor
+        case .idle, .waiting, .completed:
             dot.backgroundColor = dim
         }
     }
