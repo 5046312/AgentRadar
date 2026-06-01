@@ -33,9 +33,22 @@ struct HookFileChange: Identifiable {
         return url.path
     }
 
-    var diffText: String {
-        HookDiffFormatter.makeDiff(path: displayPath, currentText: currentText, updatedText: updatedText)
+    var diffLines: [HookDiffLine] {
+        HookDiffFormatter.makeDiffLines(path: displayPath, currentText: currentText, updatedText: updatedText)
     }
+}
+
+enum HookDiffLineKind: String {
+    case header
+    case context
+    case addition
+    case deletion
+}
+
+struct HookDiffLine: Identifiable {
+    let id: String
+    let kind: HookDiffLineKind
+    let text: String
 }
 
 struct HookInstallPlan: Identifiable {
@@ -99,7 +112,7 @@ final class HookSetupStore: ObservableObject {
             try HookConfigurationManager.apply(plan: pendingPlan)
             self.pendingPlan = nil
             refresh()
-            lastMessage = "Hooks 已安装，Codex 首次运行时记得信任 AgentRadar hook。"
+            lastMessage = "Hooks 已安装。重启当前 Claude/Codex 会话后生效；Codex 首次重启记得信任 AgentRadar hook。"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -135,9 +148,9 @@ enum HookConfigurationManager {
         let claudeCommandMap = commandMap(runtime: .claude, events: claudeEvents, executablePath: executablePath)
         let codexCommandMap = commandMap(runtime: .codex, events: codexEvents, executablePath: executablePath)
 
-        let claudeInstalled = hasRequiredHooks(at: PathUtils.claudeSettingsFile, expectedCommands: claudeCommandMap)
+        let claudeInstalled = hasRequiredHooks(at: PathUtils.claudeSettingsFile, runtime: .claude, expectedCommands: claudeCommandMap)
         let codexFeatureEnabled = codexHooksEnabled(in: try? String(contentsOf: PathUtils.codexConfigFile, encoding: .utf8))
-        let codexHooksInstalled = hasRequiredHooks(at: PathUtils.codexHooksFile, expectedCommands: codexCommandMap)
+        let codexHooksInstalled = hasRequiredHooks(at: PathUtils.codexHooksFile, runtime: .codex, expectedCommands: codexCommandMap)
         let eventsFileExists = FileManager.default.fileExists(atPath: PathUtils.hookEventsFile.path)
 
         return HookSetupState(
@@ -216,27 +229,17 @@ enum HookConfigurationManager {
 
     private static func updatedHooksRoot(from root: [String: Any], runtime: RuntimeKind, events: [String], executablePath: String) -> [String: Any] {
         var root = root
-        var hooks = root["hooks"] as? [String: Any] ?? [:]
 
         for event in events {
             let command = hookCommand(runtime: runtime, event: event, executablePath: executablePath)
-            var entries = hooks[event] as? [[String: Any]] ?? []
+            var entries = hookEntries(from: root, runtime: runtime, event: event)
             entries.removeAll { entry in
                 // 先移除旧的 AgentRadar hook，避免 app 挪位置后残留无效路径。
                 hasAgentRadarHook(entry, runtime: runtime, event: event)
             }
-            entries.append([
-                "hooks": [
-                    [
-                        "type": "command",
-                        "command": command
-                    ]
-                ]
-            ])
-            hooks[event] = entries
+            entries.append(makeHookEntry(command: command))
+            setHookEntries(entries, into: &root, runtime: runtime, event: event)
         }
-
-        root["hooks"] = hooks
         return root
     }
 
@@ -360,27 +363,22 @@ enum HookConfigurationManager {
         )
     }
 
-    private static func hasRequiredHooks(at url: URL, expectedCommands: [String: String]) -> Bool {
+    private static func hasRequiredHooks(at url: URL, runtime: RuntimeKind, expectedCommands: [String: String]) -> Bool {
         guard
             let data = try? Data(contentsOf: url),
             let rawObject = try? JSONSerialization.jsonObject(with: data),
-            let object = rawObject as? [String: Any],
-            let hooks = object["hooks"] as? [String: Any]
+            let object = rawObject as? [String: Any]
         else {
             return false
         }
 
         return expectedCommands.allSatisfy { event, command in
-            guard let entries = hooks[event] as? [[String: Any]] else {
+            let entries = hookEntries(from: object, runtime: runtime, event: event)
+            guard !entries.isEmpty else {
                 return false
             }
             return entries.contains { entry in
-                guard let nestedHooks = entry["hooks"] as? [[String: Any]] else {
-                    return false
-                }
-                return nestedHooks.contains { hook in
-                    (hook["type"] as? String) == "command" && (hook["command"] as? String) == command
-                }
+                isRequiredHook(entry, command: command)
             }
         }
     }
@@ -420,6 +418,53 @@ enum HookConfigurationManager {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    private static func hookEntries(from root: [String: Any], runtime: RuntimeKind, event: String) -> [[String: Any]] {
+        switch runtime {
+        case .claude:
+            return root[event] as? [[String: Any]] ?? []
+        case .codex:
+            let hooks = root["hooks"] as? [String: Any] ?? [:]
+            return hooks[event] as? [[String: Any]] ?? []
+        }
+    }
+
+    private static func setHookEntries(_ entries: [[String: Any]], into root: inout [String: Any], runtime: RuntimeKind, event: String) {
+        switch runtime {
+        case .claude:
+            // Claude 用户 settings.json 用直写格式，事件直接挂在顶层，不能再包一层 hooks。
+            root[event] = entries
+        case .codex:
+            var hooks = root["hooks"] as? [String: Any] ?? [:]
+            hooks[event] = entries
+            root["hooks"] = hooks
+        }
+    }
+
+    private static func makeHookEntry(command: String) -> [String: Any] {
+        [
+            "matcher": "*",
+            "hooks": [
+                [
+                    "type": "command",
+                    "command": command
+                ]
+            ]
+        ]
+    }
+
+    private static func isRequiredHook(_ entry: [String: Any], command: String) -> Bool {
+        guard
+            let matcher = entry["matcher"] as? String,
+            matcher == "*",
+            let nestedHooks = entry["hooks"] as? [[String: Any]]
+        else {
+            return false
+        }
+        return nestedHooks.contains { hook in
+            (hook["type"] as? String) == "command" && (hook["command"] as? String) == command
+        }
+    }
+
     private static func jsonObjectsEqual(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
         guard
             let lhsData = try? JSONSerialization.data(withJSONObject: lhs, options: [.sortedKeys]),
@@ -432,40 +477,39 @@ enum HookConfigurationManager {
 }
 
 enum HookDiffFormatter {
-    static func makeDiff(path: String, currentText: String?, updatedText: String) -> String {
+    static func makeDiffLines(path: String, currentText: String?, updatedText: String) -> [HookDiffLine] {
         let currentLines = lines(from: currentText ?? "")
         let updatedLines = lines(from: updatedText)
         let prefixCount = commonPrefixCount(currentLines, updatedLines)
         let suffixCount = commonSuffixCount(currentLines, updatedLines, prefixCount: prefixCount)
 
-        var diffLines = [
-            "--- \(currentText == nil ? "/dev/null" : path)",
-            "+++ \(path)"
-        ]
+        var diffLines: [HookDiffLine] = []
+        appendLine(&diffLines, kind: .header, text: "--- \(currentText == nil ? "/dev/null" : path)")
+        appendLine(&diffLines, kind: .header, text: "+++ \(path)")
 
         for line in currentLines.prefix(prefixCount) {
-            diffLines.append(" \(line)")
+            appendLine(&diffLines, kind: .context, text: " \(line)")
         }
 
         if currentLines.count > prefixCount + suffixCount {
             for line in currentLines[prefixCount..<(currentLines.count - suffixCount)] {
-                diffLines.append("-\(line)")
+                appendLine(&diffLines, kind: .deletion, text: "-\(line)")
             }
         }
 
         if updatedLines.count > prefixCount + suffixCount {
             for line in updatedLines[prefixCount..<(updatedLines.count - suffixCount)] {
-                diffLines.append("+\(line)")
+                appendLine(&diffLines, kind: .addition, text: "+\(line)")
             }
         }
 
         if suffixCount > 0 {
             for line in currentLines.suffix(suffixCount) {
-                diffLines.append(" \(line)")
+                appendLine(&diffLines, kind: .context, text: " \(line)")
             }
         }
 
-        return diffLines.joined(separator: "\n")
+        return diffLines
     }
 
     private static func lines(from text: String) -> [String] {
@@ -485,6 +529,10 @@ enum HookDiffFormatter {
             count += 1
         }
         return count
+    }
+
+    private static func appendLine(_ lines: inout [HookDiffLine], kind: HookDiffLineKind, text: String) {
+        lines.append(HookDiffLine(id: "\(kind.rawValue)-\(lines.count)", kind: kind, text: text))
     }
 
     // 配置文件都很小，这里保留公共前后缀即可，预览足够直观，也避免引入更重的 diff 实现。

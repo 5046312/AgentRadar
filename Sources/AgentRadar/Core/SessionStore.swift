@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import UserNotifications
 
 struct ProjectGroup: Identifiable {
     let id: String
@@ -19,10 +20,19 @@ struct ProjectGroup: Identifiable {
 
 @MainActor
 final class SessionStore: ObservableObject {
+    private enum DefaultsKey {
+        static let soundEnabled = "soundEnabled"
+        static let reminderStyle = "reminderStyle"
+    }
+
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
     @Published private(set) var latestCompletion: CompletionNotice?
-    @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: "soundEnabled")
+    @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
+    @Published var reminderStyle: ReminderStyle = {
+        let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
+        return ReminderStyle(rawValue: rawValue ?? "") ?? .statusBarBubble
+    }()
 
     var sortedSessions: [Session] {
         sessions.values.sorted { lhs, rhs in
@@ -192,11 +202,9 @@ final class SessionStore: ObservableObject {
                 changed = true
                 continue
             }
-            if s.status == .running {
+            if s.status == .running, s.runtime == .claude {
                 let elapsed = now.timeIntervalSince(s.lastEventTimestamp)
-                // Codex running 只靠 hook 刷新，长思考期可能没有文件变化；这里保留更长兜底。
-                let idleTimeout: TimeInterval = s.runtime == .codex ? 5 * 60 : 30
-                if elapsed > idleTimeout {
+                if elapsed > 30 {
                     s.status = .idle
                     sessions[id] = s
                     changed = true
@@ -208,12 +216,61 @@ final class SessionStore: ObservableObject {
 
     func toggleSound() {
         soundEnabled.toggle()
-        UserDefaults.standard.set(soundEnabled, forKey: "soundEnabled")
+        UserDefaults.standard.set(soundEnabled, forKey: DefaultsKey.soundEnabled)
+    }
+
+    func setReminderStyle(_ style: ReminderStyle) {
+        reminderStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.reminderStyle)
+    }
+
+    func requestSystemNotificationAuthorization() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        let settings = await loadNotificationSettings(center)
+        switch settings.authorizationStatus {
+        case .authorized, .provisional:
+            return true
+        case .notDetermined:
+            // 只在用户主动切到系统消息时申请权限，避免首次启动就打断。
+            return await requestNotificationAuthorization(center)
+        case .denied:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    func canDeliverSystemNotification() async -> Bool {
+        let settings = await loadNotificationSettings(UNUserNotificationCenter.current())
+        switch settings.authorizationStatus {
+        case .authorized, .provisional:
+            return true
+        case .notDetermined, .denied:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
     private func playCompletionSound() {
         guard soundEnabled else { return }
         NSSound(named: "Glass")?.play()
+    }
+
+    private func loadNotificationSettings(_ center: UNUserNotificationCenter) async -> UNNotificationSettings {
+        await withCheckedContinuation { continuation in
+            center.getNotificationSettings { settings in
+                continuation.resume(returning: settings)
+            }
+        }
+    }
+
+    private func requestNotificationAuthorization(_ center: UNUserNotificationCenter) async -> Bool {
+        await withCheckedContinuation { continuation in
+            center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                continuation.resume(returning: granted)
+            }
+        }
     }
 
     private func publishCompletion(_ session: Session) {

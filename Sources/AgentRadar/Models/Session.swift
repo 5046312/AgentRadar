@@ -21,6 +21,20 @@ enum RuntimeKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum ReminderStyle: String, Codable, CaseIterable, Identifiable {
+    case statusBarBubble
+    case systemNotification
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .statusBarBubble: return "状态栏气泡"
+        case .systemNotification: return "系统消息"
+        }
+    }
+}
+
 enum SessionStatus: String, Codable {
     case running
     case waiting
@@ -55,19 +69,38 @@ struct Session: Identifiable, Equatable {
 struct CompletionNotice: Identifiable, Equatable {
     let id = UUID()
     let runtime: RuntimeKind
-    let taskTitle: String
+    let projectName: String
     let duration: TimeInterval?
-    let tokenTotal: Int
+    let totalTokens: Int
+    let inputTokens: Int
+    let outputTokens: Int
+    let cacheReadTokens: Int
 
     init(session: Session) {
         runtime = session.runtime
-        taskTitle = session.taskTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? session.projectName
+        projectName = session.projectName
         duration = session.lastDuration
-        tokenTotal = max(
+        inputTokens = session.inputTokens
+        outputTokens = session.outputTokens
+        cacheReadTokens = session.cacheReadTokens
+        totalTokens = max(
             session.lastTokenTotal,
             session.inputTokens + session.outputTokens + session.cacheReadTokens
         )
+    }
+}
+
+extension CompletionNotice {
+    var titleText: String {
+        projectName
+    }
+
+    var messageText: String {
+        "\(projectName) 任务完成，请及时审阅"
+    }
+
+    var notificationBodyText: String {
+        messageText
     }
 }
 

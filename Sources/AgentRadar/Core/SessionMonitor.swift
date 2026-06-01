@@ -39,7 +39,7 @@ final class SessionMonitor {
         case .claude:
             scanClaudeInitial()
         case .codex:
-            scanCodexInitial()
+            break
         }
     }
 
@@ -60,14 +60,6 @@ final class SessionMonitor {
         }
     }
 
-    private func scanCodexInitial() {
-        let dir = PathUtils.sessionsDir(for: .codex)
-        guard let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) else { return }
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            ingestFile(url, runtime: .codex, fullScan: true)
-        }
-    }
-
     private func ingestFile(_ url: URL, runtime: RuntimeKind, fullScan: Bool) {
         let rawSessionId = rawSessionId(for: url, runtime: runtime)
         let sessionId = "\(runtime.rawValue):\(rawSessionId)"
@@ -75,6 +67,10 @@ final class SessionMonitor {
         let projectName = PathUtils.projectNameFromPath(projectPath)
 
         let existing = store.sessions[sessionId]
+        if runtime == .codex, existing == nil, fullScan {
+            // 启动恢复阶段仍然不靠 Codex JSONL 扫旧状态，只处理运行中新增的文件变化。
+            return
+        }
         var session = existing ?? Session(
             id: sessionId,
             runtime: runtime,
@@ -100,12 +96,11 @@ final class SessionMonitor {
         session.fileURL = url
 
         let startOffset = fullScan ? 0 : session.fileOffset
-        let readResult = runtime == .codex && fullScan
-            ? JSONLReader.readTailLines(from: url, maxLines: 16)
-            : JSONLReader.readNewLines(from: url, startingAt: startOffset)
+        let readResult = JSONLReader.readNewLines(from: url, startingAt: startOffset)
         let lines = readResult.lines
         let newOffset = readResult.newOffset
         session.fileOffset = newOffset
+        var codexPromptSubmittedAt: Date?
 
         guard !lines.isEmpty else {
             refreshDerivedStatus(&session, runtime: runtime)
@@ -116,7 +111,7 @@ final class SessionMonitor {
         for line in lines {
             guard let summary = parseSummary(line, runtime: runtime) else { continue }
             session.lastActivity = max(session.lastActivity, summary.timestamp)
-            if runtime == .claude || session.status == .idle {
+            if runtime == .claude {
                 session.lastEventTimestamp = summary.timestamp
             }
             if let cwd = summary.cwd, !cwd.isEmpty {
@@ -127,6 +122,10 @@ final class SessionMonitor {
             if let tool = summary.toolName { session.currentTool = tool }
             if let txt = summary.userText, !txt.isEmpty {
                 session.taskTitle = String(txt.prefix(120))
+                if runtime == .codex, !fullScan, summary.role == "user" {
+                    // Codex 在真正开跑前，JSONL 会先落一条 user_message；用它把状态提前切到运行中。
+                    codexPromptSubmittedAt = summary.timestamp
+                }
             }
             if let txt = summary.assistantText, !txt.isEmpty {
                 session.lastAssistantText = String(txt.prefix(200))
@@ -137,6 +136,9 @@ final class SessionMonitor {
         refreshDerivedStatus(&session, runtime: runtime)
 
         store.upsert(session)
+        if runtime == .codex, let codexPromptSubmittedAt, session.status != .running {
+            store.setStatus(id: sessionId, status: .running, eventTime: codexPromptSubmittedAt)
+        }
     }
 
     private func rawSessionId(for url: URL, runtime: RuntimeKind) -> String {

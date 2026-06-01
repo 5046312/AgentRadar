@@ -36,6 +36,11 @@ struct PopoverContent: View {
             HStack(spacing: 8) {
                 Text("AgentRadar")
                     .font(.system(size: 13, weight: .semibold))
+                if !hookSetup.state.allInstalled {
+                    Text("未设置 Hooks")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.red)
+                }
                 Button(action: { showingSettings = true }) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 12, weight: .semibold))
@@ -44,7 +49,7 @@ struct PopoverContent: View {
                 .foregroundStyle(.secondary)
                 .help("设置")
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
-                    HookSettingsView(store: hookSetup)
+                    HookSettingsView(store: hookSetup, sessionStore: store)
                 }
                 Button(action: { showingHelp = true }) {
                     Image(systemName: "questionmark.circle")
@@ -178,7 +183,7 @@ private struct HookHelpView: View {
             Text("使用说明")
                 .font(.system(size: 13, weight: .semibold))
 
-            helpRow("安装 hooks", "点齿轮按钮会先预览 diff，确认后再写入；也可以在项目目录执行 ./install-hooks.sh。")
+            helpRow("安装 hooks", "点齿轮按钮会先预览 diff，确认后再写入；重启当前 Claude/Codex 会话后才生效。")
             helpRow("Codex 状态", "Codex 的运行、等待输入、完成状态来自 hooks，不再靠 session 文件增长猜测。")
             helpRow("首次信任", "Codex 下次启动可能要求 Review hooks，选择信任后状态才会写入。")
             helpRow("事件文件", "所有事件写入 ~/.agentradar/events.jsonl，AgentRadar 只读本机文件。")
@@ -201,52 +206,84 @@ private struct HookHelpView: View {
 
 private struct HookSettingsView: View {
     @ObservedObject var store: HookSetupStore
+    @ObservedObject var sessionStore: SessionStore
+    @State private var reminderMessage: String?
+    @State private var reminderErrorMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("设置")
                 .font(.system(size: 13, weight: .semibold))
 
-            statusRow("Claude hooks", store.state.claudeInstalled)
-            statusRow("Codex features.hooks", store.state.codexFeatureEnabled)
-            statusRow("Codex hooks.json", store.state.codexHooksInstalled)
-            statusRow("事件文件", store.state.eventsFileExists)
+            settingsSection("Hooks") {
+                statusRow("Claude hooks", store.state.claudeInstalled)
+                statusRow("Codex features.hooks", store.state.codexFeatureEnabled)
+                statusRow("Codex hooks.json", store.state.codexHooksInstalled)
+                statusRow("事件文件", store.state.eventsFileExists)
 
-            if let message = store.lastMessage {
-                Text(message)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let errorMessage = store.errorMessage {
-                Text(errorMessage)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack(spacing: 10) {
-                Button(store.state.allInstalled ? "重装 Hooks" : "安装 Hooks") {
-                    store.prepareInstallPreview()
+                if let message = store.lastMessage {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(store.isApplying)
 
-                Button("重新检查") {
-                    store.refresh()
+                if let errorMessage = store.errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.bordered)
-                .disabled(store.isApplying)
+
+                HStack(spacing: 10) {
+                    Button(store.state.allInstalled ? "重装 Hooks" : "安装 Hooks") {
+                        store.prepareInstallPreview()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.isApplying)
+
+                    Button("重新检查") {
+                        store.refresh()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(store.isApplying)
+                }
             }
 
-            Text("安装前会先显示 diff 预览。确认后直接覆盖目标文件，不再备份。")
+            settingsSection("提醒方式") {
+                Picker("提醒方式", selection: reminderStyleBinding) {
+                    ForEach(ReminderStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+
+                if let reminderErrorMessage {
+                    Text(reminderErrorMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let reminderMessage {
+                    Text(reminderMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(reminderDescription)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Text("安装前会先显示 diff 预览。确认后直接覆盖目标文件，不再备份；重启当前会话后才生效。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
-        .frame(width: 320, alignment: .leading)
+        .frame(width: 360, alignment: .leading)
         .sheet(
             isPresented: Binding(
                 get: { store.pendingPlan != nil },
@@ -261,6 +298,56 @@ private struct HookSettingsView: View {
                 HookInstallPreviewSheet(store: store, plan: pendingPlan)
             }
         }
+    }
+
+    private var reminderStyleBinding: Binding<ReminderStyle> {
+        Binding(
+            get: { sessionStore.reminderStyle },
+            set: { newValue in
+                Task { @MainActor in
+                    await applyReminderStyle(newValue)
+                }
+            }
+        )
+    }
+
+    private var reminderDescription: String {
+        switch sessionStore.reminderStyle {
+        case .statusBarBubble:
+            return "任务完成后在状态栏按钮下方显示气泡提醒。"
+        case .systemNotification:
+            return "任务完成后改用系统消息提醒；若此前拒绝过权限，需要到系统设置里重新开启。"
+        }
+    }
+
+    private func applyReminderStyle(_ style: ReminderStyle) async {
+        reminderMessage = nil
+        reminderErrorMessage = nil
+
+        guard style == .systemNotification else {
+            sessionStore.setReminderStyle(.statusBarBubble)
+            return
+        }
+
+        // 切到系统消息前先申请权限，避免用户切完后实际没有任何提醒。
+        if await sessionStore.requestSystemNotificationAuthorization() {
+            sessionStore.setReminderStyle(.systemNotification)
+            reminderMessage = "系统消息已开启，任务完成后会走系统通知。"
+        } else {
+            sessionStore.setReminderStyle(.statusBarBubble)
+            reminderErrorMessage = "系统消息未授权，已切回状态栏气泡。请到系统设置 > 通知开启 AgentRadar。"
+        }
+    }
+
+    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func statusRow(_ title: String, _ ok: Bool) -> some View {
@@ -312,13 +399,9 @@ private struct HookInstallPreviewSheet: View {
                                     .font(.system(size: 11, weight: .semibold))
 
                                 ScrollView(.horizontal) {
-                                    Text(change.diffText)
-                                        .textSelection(.enabled)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    HookDiffBlockView(lines: change.diffLines)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(10)
                                 .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                             }
                         }
@@ -344,6 +427,84 @@ private struct HookInstallPreviewSheet: View {
         }
         .padding(16)
         .frame(width: 700, height: 520, alignment: .topLeading)
+    }
+}
+
+private struct HookDiffBlockView: View {
+    let lines: [HookDiffLine]
+
+    var body: some View {
+        // 纯 Text 很难做增删行着色，按行渲染才能接近编辑器里的 diff 观感。
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(lines) { line in
+                HookDiffLineView(line: line)
+            }
+        }
+        .textSelection(.enabled)
+        .padding(.vertical, 8)
+    }
+}
+
+private struct HookDiffLineView: View {
+    let line: HookDiffLine
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Rectangle()
+                .fill(accentColor)
+                .frame(width: 3)
+
+            Text(line.text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(foregroundColor)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundColor)
+    }
+
+    private var foregroundColor: Color {
+        switch line.kind {
+        case .header:
+            return .secondary
+        case .context:
+            return .primary
+        case .addition:
+            return Color(nsColor: .systemGreen)
+        case .deletion:
+            return Color(nsColor: .systemRed)
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch line.kind {
+        case .header:
+            return Color.secondary.opacity(0.08)
+        case .context:
+            return .clear
+        case .addition:
+            return Color(nsColor: .systemGreen).opacity(0.14)
+        case .deletion:
+            return Color(nsColor: .systemRed).opacity(0.14)
+        }
+    }
+
+    private var accentColor: Color {
+        switch line.kind {
+        case .header:
+            return Color.secondary.opacity(0.25)
+        case .context:
+            return .clear
+        case .addition:
+            return Color(nsColor: .systemGreen)
+        case .deletion:
+            return Color(nsColor: .systemRed)
+        }
     }
 }
 

@@ -36,47 +36,6 @@ enum JSONLReader {
         return (lines, newOffset)
     }
 
-    static func readTailLines(from url: URL, maxLines: Int) -> (lines: [Data], newOffset: UInt64) {
-        guard maxLines > 0, let handle = try? FileHandle(forReadingFrom: url) else {
-            return ([], 0)
-        }
-        defer { try? handle.close() }
-        guard let fileSize = try? handle.seekToEnd(), fileSize > 0 else {
-            return ([], 0)
-        }
-
-        let chunkSize: UInt64 = 16 * 1024
-        var position = fileSize
-        var buffer = Data()
-        var newlineCount = 0
-
-        while position > 0 && newlineCount <= maxLines {
-            let readSize = min(chunkSize, position)
-            position -= readSize
-            do {
-                try handle.seek(toOffset: position)
-            } catch {
-                return ([], fileSize)
-            }
-            guard let chunk = try? handle.read(upToCount: Int(readSize)), !chunk.isEmpty else {
-                break
-            }
-            buffer.insert(contentsOf: chunk, at: 0)
-            newlineCount += chunk.reduce(into: 0) { count, byte in
-                if byte == 0x0A {
-                    count += 1
-                }
-            }
-        }
-
-        let (parsedLines, _) = completeLines(in: buffer)
-        let lines = position > 0 ? Array(parsedLines.dropFirst()) : parsedLines
-        if lines.count <= maxLines {
-            return (lines, fileSize)
-        }
-        return (Array(lines.suffix(maxLines)), fileSize)
-    }
-
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
