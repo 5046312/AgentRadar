@@ -36,13 +36,13 @@ open ./AgentRadar.app
 
 Codex 状态依赖 hooks；Claude 的等待、完成等状态也通过 hooks 更可靠：
 
-先打开 AgentRadar，点弹窗顶部齿轮按钮里的“安装 Hooks”；也可以继续用命令行：
+先打开 AgentRadar，点弹窗顶部齿轮按钮里的“安装 Hooks”。应用内会先展示 diff 预览，确认后再写入；也可以继续用命令行：
 
 ```bash
 ./install-hooks.sh
 ```
 
-安装逻辑由 AgentRadar 原生执行，不依赖 `jq`。它会备份并更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
+安装逻辑由 AgentRadar 原生执行，不依赖 `jq`。它会直接更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`，不再生成备份。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
 
 ## 打包 DMG
 
@@ -72,7 +72,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-如需还原 hooks 配置，使用 `install-hooks.sh` 生成的 `.bak.<timestamp>` 备份覆盖对应配置文件。
+当前 hooks 安装不会自动生成备份，如需回退请自行恢复对应配置文件。
 
 ## 许可
 

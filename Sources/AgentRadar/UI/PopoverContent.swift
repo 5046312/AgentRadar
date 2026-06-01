@@ -178,7 +178,7 @@ private struct HookHelpView: View {
             Text("使用说明")
                 .font(.system(size: 13, weight: .semibold))
 
-            helpRow("安装 hooks", "点齿轮按钮可直接安装；也可以在项目目录执行 ./install-hooks.sh。")
+            helpRow("安装 hooks", "点齿轮按钮会先预览 diff，确认后再写入；也可以在项目目录执行 ./install-hooks.sh。")
             helpRow("Codex 状态", "Codex 的运行、等待输入、完成状态来自 hooks，不再靠 session 文件增长猜测。")
             helpRow("首次信任", "Codex 下次启动可能要求 Review hooks，选择信任后状态才会写入。")
             helpRow("事件文件", "所有事件写入 ~/.agentradar/events.jsonl，AgentRadar 只读本机文件。")
@@ -228,7 +228,7 @@ private struct HookSettingsView: View {
 
             HStack(spacing: 10) {
                 Button(store.state.allInstalled ? "重装 Hooks" : "安装 Hooks") {
-                    store.installHooks()
+                    store.prepareInstallPreview()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(store.isApplying)
@@ -240,13 +240,27 @@ private struct HookSettingsView: View {
                 .disabled(store.isApplying)
             }
 
-            Text("原生写入配置，不依赖 jq。若移动了 AgentRadar.app，重装一次 hooks 即可。")
+            Text("安装前会先显示 diff 预览。确认后直接覆盖目标文件，不再备份。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .frame(width: 320, alignment: .leading)
+        .sheet(
+            isPresented: Binding(
+                get: { store.pendingPlan != nil },
+                set: { presented in
+                    if !presented {
+                        store.dismissInstallPreview()
+                    }
+                }
+            )
+        ) {
+            if let pendingPlan = store.pendingPlan {
+                HookInstallPreviewSheet(store: store, plan: pendingPlan)
+            }
+        }
     }
 
     private func statusRow(_ title: String, _ ok: Bool) -> some View {
@@ -261,6 +275,75 @@ private struct HookSettingsView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct HookInstallPreviewSheet: View {
+    @ObservedObject var store: HookSetupStore
+    let plan: HookInstallPlan
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("确认 Hooks 变更")
+                .font(.system(size: 14, weight: .semibold))
+
+            Text("确认后直接覆盖目标文件，不再备份。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            if plan.createsEventsFile {
+                Text("将创建空文件：~/.agentradar/events.jsonl")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            if plan.changes.isEmpty {
+                Spacer()
+                Text("本次仅创建事件文件。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(plan.changes) { change in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(change.displayPath)
+                                    .font(.system(size: 11, weight: .semibold))
+
+                                ScrollView(.horizontal) {
+                                    Text(change.diffText)
+                                        .textSelection(.enabled)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+
+                Button("取消") {
+                    store.dismissInstallPreview()
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isApplying)
+
+                Button("确认写入") {
+                    store.applyPendingPlan()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isApplying)
+            }
+        }
+        .padding(16)
+        .frame(width: 700, height: 520, alignment: .topLeading)
     }
 }
 

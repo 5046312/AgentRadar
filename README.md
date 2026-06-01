@@ -36,13 +36,13 @@ open ./AgentRadar.app
 
 Codex status depends on hooks. Hooks also make Claude waiting and completed states more reliable:
 
-Open AgentRadar and use the gear button in the popover to install hooks, or keep using the CLI wrapper:
+Open AgentRadar and use the gear button in the popover to install hooks. In-app install shows a diff preview before writing. You can also keep using the CLI wrapper:
 
 ```bash
 ./install-hooks.sh
 ```
 
-The install path is handled natively by AgentRadar and does not require `jq`. It backs up and updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
+The install path is handled natively by AgentRadar and does not require `jq`. It directly updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json` without creating backup files. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
 
 ## Package DMG
 
@@ -72,7 +72,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-To restore hook settings, replace the edited config files with the matching `.bak.<timestamp>` backups created by `install-hooks.sh`.
+Hook install no longer creates automatic backups. Restore config files manually if you need to roll back.
 
 ## License
 
