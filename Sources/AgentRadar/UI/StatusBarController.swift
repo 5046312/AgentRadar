@@ -17,11 +17,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var failureCancellable: AnyCancellable?
     private var completionCloseTimer: Timer?
     private var statusAnimationTimer: Timer?
+    private var cellRevealTimer: Timer?
+    private var cellRevealStartedAt: Date?
     private var activeAnimationInterval: TimeInterval?
-    private var lastAnimationTokenSample: (tokens: Int, timestamp: Date)?
-    private var lastIntervalTPS: Double?
-    private var litCellColors: [NSColor] = Array(repeating: .systemGreen, count: 9)
     private var statusAnimationStep = 0
+    private var cellRevealProgress: CGFloat = 1.0
+    private var breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
 
     init(store: SessionStore) {
         self.store = store
@@ -129,42 +130,73 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func refresh() {
-        updateStatusAnimation()
+        syncStatusAnimationTimer()
         renderStatusItem()
     }
 
-    private func updateStatusAnimation() {
-        guard store.aggregateStatus == .running else {
+    private func syncStatusAnimationTimer() {
+        guard store.activeCount > 0 else {
             statusAnimationTimer?.invalidate()
             statusAnimationTimer = nil
+            cellRevealTimer?.invalidate()
+            cellRevealTimer = nil
+            cellRevealStartedAt = nil
             activeAnimationInterval = nil
-            lastAnimationTokenSample = nil
-            lastIntervalTPS = nil
-            litCellColors = Array(repeating: .systemGreen, count: 9)
             statusAnimationStep = 0
+            cellRevealProgress = 1.0
+            breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
             return
         }
+
         let interval = store.nineGridAnimationInterval
-        let needsSpeedUpdate = activeAnimationInterval.map { abs($0 - interval) > 0.001 } ?? true
-        guard statusAnimationTimer == nil || needsSpeedUpdate else { return }
-        let wasAnimating = statusAnimationTimer != nil
+        let needsIntervalUpdate = activeAnimationInterval.map { abs($0 - interval) > 0.001 } ?? true
+        guard statusAnimationTimer == nil || needsIntervalUpdate else {
+            return
+        }
+
         statusAnimationTimer?.invalidate()
         activeAnimationInterval = interval
-        if !wasAnimating {
-            lastAnimationTokenSample = (store.runningTokenDeltaTotal(), Date())
-            lastIntervalTPS = nil
-            litCellColors = Array(repeating: .systemGreen, count: 9)
-            statusAnimationStep = 0
+        if statusAnimationStep == 0 {
+            advanceNineGridAnimation()
         }
-        // 只在用户调整九宫格速度时重建 Timer，避免普通状态刷新打断动画节奏。
-        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        scheduleNextStatusAnimationTick()
+    }
+
+    private func scheduleNextStatusAnimationTick() {
+        statusAnimationTimer?.invalidate()
+        let randomizedInterval = clampedStatusAnimationInterval(nextBreathingAnimationInterval())
+        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: randomizedInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                guard self.store.activeCount > 0 else {
+                    self.syncStatusAnimationTimer()
+                    self.renderStatusItem()
+                    return
+                }
                 self.advanceNineGridAnimation()
                 self.renderStatusItem()
-                self.updateStatusAnimation()
+                self.scheduleNextStatusAnimationTick()
             }
         }
+    }
+
+    private func nextBreathingAnimationInterval() -> TimeInterval {
+        breathingAnimationPhase += Double.random(in: 0.42...0.68)
+        if breathingAnimationPhase > Double.pi * 2 {
+            breathingAnimationPhase -= Double.pi * 2
+        }
+
+        // 用正弦波做主节奏，只加极小随机扰动；避免 ±1s 那种明显跳变。
+        let waveOffset = sin(breathingAnimationPhase) * 0.14
+        let jitterOffset = Double.random(in: -0.035...0.035)
+        return store.nineGridAnimationInterval * (1.0 + waveOffset + jitterOffset)
+    }
+
+    private func clampedStatusAnimationInterval(_ interval: TimeInterval) -> TimeInterval {
+        min(
+            SessionStore.maxNineGridAnimationInterval,
+            max(SessionStore.minNineGridAnimationInterval, interval)
+        )
     }
 
     private func renderStatusItem() {
@@ -212,85 +244,117 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let gap: CGFloat = 0.5
         let cell = (rect.width - gap * 2) / 3
         let corner = min(1.1, cell * 0.22)
-        let phase = statusAnimationStep % 10
+        let litCount = min(max(statusAnimationStep, 0), 9)
 
         for index in 0..<9 {
             let row = index / 3
             let column = index % 3
             let x = CGFloat(column) * (cell + gap)
             let y = rect.height - cell - CGFloat(row) * (cell + gap)
-            switch store.aggregateStatus {
-            case .running:
-                // 运行中按左上到右下逐个累积点亮，满格后整组熄灭再开始下一轮。
-                let litCount = phase == 9 ? 0 : phase + 1
-                let color = index < litCount
-                    ? litCellColors[index].withAlphaComponent(1.0)
-                    : NSColor(white: 0.5, alpha: 0.18)
-                color.setFill()
-            case .error:
-                statusColor(alpha: 1.0).setFill()
-            case .idle, .waiting, .completed:
-                statusColor(alpha: 1.0).setFill()
+            let cellRect = NSRect(x: x, y: y, width: cell, height: cell)
+            if store.activeCount > 0 {
+                if index < litCount {
+                    drawRunningCell(
+                        in: cellRect,
+                        corner: corner,
+                        isNewest: index == litCount - 1
+                    )
+                } else {
+                    emptyCellColor.setFill()
+                    NSBezierPath(
+                        roundedRect: cellRect,
+                        xRadius: corner,
+                        yRadius: corner
+                    ).fill()
+                }
+            } else {
+                switch store.aggregateStatus {
+                case .error:
+                    statusColor(alpha: 1.0).setFill()
+                case .running, .idle, .waiting, .completed:
+                    statusColor(alpha: 1.0).setFill()
+                }
+                NSBezierPath(
+                    roundedRect: cellRect,
+                    xRadius: corner,
+                    yRadius: corner
+                ).fill()
             }
-
-            NSBezierPath(
-                roundedRect: NSRect(x: x, y: y, width: cell, height: cell),
-                xRadius: corner,
-                yRadius: corner
-            ).fill()
         }
     }
 
     private func advanceNineGridAnimation() {
-        let nextStep = statusAnimationStep + 1
-        let phase = nextStep % 10
+        if statusAnimationStep >= 9 {
+            statusAnimationStep = 0
+        }
+        statusAnimationStep += 1
+        startCellRevealAnimation()
+    }
 
-        if phase == 9 {
-            // 第 10 帧是整组熄灭，不产生“新亮起”颜色样本。
-            statusAnimationStep = nextStep
+    private func startCellRevealAnimation() {
+        cellRevealTimer?.invalidate()
+        cellRevealProgress = 0
+        cellRevealStartedAt = Date()
+
+        // 每格点亮只做一次很短的淡入+放大，避免状态栏图标看起来突然跳变。
+        cellRevealTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.store.activeCount > 0 else {
+                    self.cellRevealTimer?.invalidate()
+                    self.cellRevealTimer = nil
+                    return
+                }
+
+                self.updateCellRevealProgress()
+                self.renderStatusItem()
+            }
+        }
+    }
+
+    private func updateCellRevealProgress() {
+        guard let startedAt = cellRevealStartedAt else {
+            cellRevealProgress = 1.0
             return
         }
 
-        if phase == 0 {
-            litCellColors = Array(repeating: .systemGreen, count: 9)
-        }
+        let interval = activeAnimationInterval ?? store.nineGridAnimationInterval
+        let duration = min(0.22, max(0.08, interval * 0.45))
+        let progress = Date().timeIntervalSince(startedAt) / duration
+        cellRevealProgress = min(1.0, max(0, CGFloat(progress)))
 
-        litCellColors[phase] = nextRunningStepColor()
-        statusAnimationStep = nextStep
+        if cellRevealProgress >= 1.0 {
+            cellRevealTimer?.invalidate()
+            cellRevealTimer = nil
+            cellRevealStartedAt = nil
+        }
     }
 
-    private func nextRunningStepColor() -> NSColor {
-        let now = Date()
-        let currentTokens = store.runningTokenDeltaTotal()
-
-        guard
-            let previousSample = lastAnimationTokenSample,
-            now.timeIntervalSince(previousSample.timestamp) > 0
-        else {
-            lastAnimationTokenSample = (currentTokens, now)
-            return .systemGreen
+    private func drawRunningCell(in rect: NSRect, corner: CGFloat, isNewest: Bool) {
+        if isNewest {
+            NSColor.systemGreen.withAlphaComponent(0.16 * cellRevealProgress).setFill()
+            NSBezierPath(
+                roundedRect: rect.insetBy(dx: -0.6, dy: -0.6),
+                xRadius: corner + 0.6,
+                yRadius: corner + 0.6
+            ).fill()
         }
 
-        let elapsed = now.timeIntervalSince(previousSample.timestamp)
-        let tokenDelta = max(0, currentTokens - previousSample.tokens)
-        let currentTPS = Double(tokenDelta) / elapsed
-        defer {
-            lastAnimationTokenSample = (currentTokens, now)
-            lastIntervalTPS = currentTPS
-        }
+        let revealProgress = isNewest ? cellRevealProgress : 1.0
+        let easedProgress = CGFloat(1 - pow(1 - Double(revealProgress), 3))
+        let inset = (1 - easedProgress) * min(rect.width, rect.height) * 0.28
+        let revealRect = rect.insetBy(dx: inset, dy: inset)
+        let path = NSBezierPath(roundedRect: revealRect, xRadius: corner, yRadius: corner)
+        let gradient = NSGradient(colors: [
+            NSColor(calibratedRed: 0.62, green: 1.0, blue: 0.70, alpha: revealProgress),
+            NSColor.systemGreen.withAlphaComponent(revealProgress),
+            NSColor(calibratedRed: 0.04, green: 0.45, blue: 0.18, alpha: revealProgress)
+        ])
+        gradient?.draw(in: path, angle: -45)
+    }
 
-        guard let previousTPS = lastIntervalTPS else {
-            return .systemGreen
-        }
-        guard previousTPS > 0 else {
-            return currentTPS > 0 ? .systemGreen : .systemYellow
-        }
-
-        // 颜色按相邻两次亮起之间的区间 TPS 变化决定：明显下滑红色，小幅下降黄色，上升绿色。
-        let changeRatio = (currentTPS - previousTPS) / previousTPS
-        if changeRatio > 0 { return .systemGreen }
-        if changeRatio <= -0.20 { return .systemRed }
-        return .systemYellow
+    private var emptyCellColor: NSColor {
+        NSColor(white: 0.5, alpha: 0.18)
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
@@ -373,10 +437,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             }
         }
     }
-    private var nineGridCanvasSize: NSSize {
-        NSSize(width: 13, height: 13)
-    }
 
+    private var nineGridCanvasSize: NSSize {
+        NSSize(width: 16, height: 16)
+    }
 }
 
 struct CompletionNoticeView: View {

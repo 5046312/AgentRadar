@@ -8,6 +8,7 @@ struct PopoverContent: View {
     @State private var selectedRuntime: RuntimeKind = .claude
     @State private var showingHelp = false
     @State private var showingSettings = false
+    @State private var now = Date()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,7 +20,7 @@ struct PopoverContent: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(store.projectGroups(runtime: selectedRuntime)) { group in
-                            ProjectSection(group: group)
+                            ProjectSection(group: group, now: now)
                         }
                     }
                 }
@@ -30,6 +31,9 @@ struct PopoverContent: View {
         .frame(width: 380, height: 440)
         // 弹窗内操作以鼠标为主，统一关掉按钮获得焦点时的系统光环。
         .focusEffectDisabled()
+        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { tick in
+            now = tick
+        }
     }
 
     private var header: some View {
@@ -71,16 +75,6 @@ struct PopoverContent: View {
                 ForEach(RuntimeKind.allCases) { runtime in
                     runtimeTab(runtime)
                 }
-            }
-
-            HStack(spacing: 4) {
-                Text("所有项目平均 TPS")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(formattedTPS(store.allProjectsAverageTPS()))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 12)
@@ -292,7 +286,7 @@ private struct HookSettingsView: View {
                 Slider(
                     value: nineGridAnimationIntervalBinding,
                     in: SessionStore.minNineGridAnimationInterval...SessionStore.maxNineGridAnimationInterval,
-                    step: 0.02
+                    step: 0.05
                 ) {
                     Text("九宫格速度")
                 } minimumValueLabel: {
@@ -345,15 +339,6 @@ private struct HookSettingsView: View {
         )
     }
 
-    private var reminderDescription: String {
-        switch sessionStore.reminderStyle {
-        case .statusBarBubble:
-            return "任务完成后在状态栏按钮下方显示气泡提醒。"
-        case .systemNotification:
-            return "任务完成后改用系统消息提醒；若此前拒绝过权限，需要到系统设置里重新开启。"
-        }
-    }
-
     private var nineGridAnimationIntervalBinding: Binding<Double> {
         Binding(
             get: { sessionStore.nineGridAnimationInterval },
@@ -361,6 +346,15 @@ private struct HookSettingsView: View {
                 sessionStore.setNineGridAnimationInterval(newValue)
             }
         )
+    }
+
+    private var reminderDescription: String {
+        switch sessionStore.reminderStyle {
+        case .statusBarBubble:
+            return "任务完成后在状态栏按钮下方显示气泡提醒。"
+        case .systemNotification:
+            return "任务完成后改用系统消息提醒；若此前拒绝过权限，需要到系统设置里重新开启。"
+        }
     }
 
     private var nineGridAnimationDescription: String {
@@ -561,6 +555,7 @@ private struct HookDiffLineView: View {
 
 struct ProjectSection: View {
     let group: ProjectGroup
+    let now: Date
 
     var body: some View {
         VStack(spacing: 0) {
@@ -572,11 +567,10 @@ struct ProjectSection: View {
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(formattedTPSLabel(group.averageTPS()))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(group.aggregateStatus.label)
+                Text(group.statusLabel(now: now))
                     .font(.system(size: 10, weight: .medium))
+                    .monospacedDigit()
+                    .lineLimit(1)
                     .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
             }
             .padding(.horizontal, 12)
@@ -586,17 +580,4 @@ struct ProjectSection: View {
             Divider().opacity(0.6)
         }
     }
-}
-
-private func formattedTPS(_ value: Double?) -> String {
-    guard let value else { return "采样中" }
-    if value >= 10 {
-        return String(format: "%.1f", value)
-    }
-    return String(format: "%.2f", value)
-}
-
-private func formattedTPSLabel(_ value: Double?) -> String {
-    guard value != nil else { return "采样中" }
-    return "\(formattedTPS(value)) TPS"
 }

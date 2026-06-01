@@ -16,25 +16,26 @@ struct ProjectGroup: Identifiable {
         return .idle
     }
 
-    func averageTPS(now: Date = Date()) -> Double? {
-        let samples = sessions.compactMap { session -> Double? in
-            let totalTokens = max(
-                session.lastTokenTotal,
-                session.inputTokens + session.outputTokens + session.cacheReadTokens
-            )
-
-            if session.status == .running {
-                return session.currentTPS
-            }
-
-            guard let duration = session.lastDuration, duration > 0, totalTokens > 0 else {
-                return nil
-            }
-            return Double(totalTokens) / duration
+    func statusLabel(now: Date) -> String {
+        guard aggregateStatus == .running else {
+            return aggregateStatus.label
         }
+        guard let startedAt = runningStartedAt else {
+            return aggregateStatus.label
+        }
+        return "运行 \(elapsedSeconds(from: startedAt, to: now)) 秒"
+    }
 
-        guard !samples.isEmpty else { return nil }
-        return samples.reduce(0, +) / Double(samples.count)
+    private var runningStartedAt: Date? {
+        // 项目行已经不展示子会话；多个 running 会话时，用最早开始时间表示项目已运行时长。
+        sessions
+            .filter { $0.status == .running }
+            .compactMap(\.activeStartedAt)
+            .min()
+    }
+
+    private func elapsedSeconds(from startedAt: Date, to now: Date) -> Int {
+        max(0, Int(now.timeIntervalSince(startedAt)))
     }
 }
 
@@ -46,9 +47,9 @@ final class SessionStore: ObservableObject {
         static let nineGridAnimationInterval = "nineGridAnimationInterval"
     }
 
-    nonisolated static let minNineGridAnimationInterval: Double = 0.18
-    nonisolated static let maxNineGridAnimationInterval: Double = 0.54
-    nonisolated static let defaultNineGridAnimationInterval: Double = 0.30
+    nonisolated static let minNineGridAnimationInterval: Double = 0.25
+    nonisolated static let maxNineGridAnimationInterval: Double = 2.0
+    nonisolated static let defaultNineGridAnimationInterval: Double = 1.0
 
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
@@ -67,10 +68,6 @@ final class SessionStore: ObservableObject {
     private var trackedSessions: [Session] {
         // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
         sessions.values.filter { !PathUtils.isIgnoredProjectPath($0.projectPath) }
-    }
-
-    var projectGroups: [ProjectGroup] {
-        projectGroups(runtime: nil)
     }
 
     func projectGroups(runtime: RuntimeKind?) -> [ProjectGroup] {
@@ -122,49 +119,14 @@ final class SessionStore: ObservableObject {
         trackedSessions.filter { $0.status == .running }.count
     }
 
-    func allProjectsAverageTPS(now: Date = Date()) -> Double? {
-        averageTPS(for: projectGroups, now: now)
-    }
-
-    func runningTokenDeltaTotal() -> Int {
-        trackedSessions.reduce(0) { total, session in
-            guard session.status == .running else { return total }
-            let tokenTotal = totalTokens(for: session)
-            let startedTokens = session.activeStartedTokenTotal ?? 0
-            return total + max(0, tokenTotal - startedTokens)
-        }
-    }
-
     func upsert(_ session: Session) {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
-        var nextSession = session
-        if nextSession.status == .running, nextSession.activeStartedTokenTotal == nil {
-            let tokenTotal = totalTokens(for: nextSession)
-            nextSession.activeStartedTokenTotal = tokenTotal
-            nextSession.tpsSampleTokenTotal = tokenTotal
-            nextSession.tpsSampleTimestamp = nextSession.lastEventTimestamp
-            nextSession.currentTPS = nil
-        }
+        let nextSession = session
         let oldStatus = sessions[nextSession.id]?.status
         sessions[nextSession.id] = nextSession
         version &+= 1
         if nextSession.status == .completed && oldStatus != .completed {
             publishCompletion(nextSession)
-        }
-    }
-
-    func update(id: String, transform: (inout Session) -> Void) {
-        guard var s = sessions[id] else { return }
-        guard !PathUtils.isIgnoredProjectPath(s.projectPath) else { return }
-        let oldStatus = s.status
-        transform(&s)
-        sessions[id] = s
-        version &+= 1
-        if s.status == .completed && oldStatus != .completed {
-            publishCompletion(s)
-        }
-        if s.status == .error && oldStatus != .error {
-            publishFailure(s)
         }
     }
 
@@ -177,10 +139,6 @@ final class SessionStore: ObservableObject {
         s.lastActivity = max(s.lastActivity, eventTime)
         if status == .running, oldStatus != .running {
             s.activeStartedAt = eventTime
-            s.activeStartedTokenTotal = totalTokens(for: s)
-            s.tpsSampleTokenTotal = totalTokens(for: s)
-            s.tpsSampleTimestamp = eventTime
-            s.currentTPS = nil
             s.lastDuration = nil
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
@@ -197,19 +155,27 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func setHookStatus(runtime: RuntimeKind, rawSessionId: String?, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, flashUntil: Date? = nil) {
+    func setHookStatus(runtime: RuntimeKind, rawSessionId: String?, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, transcriptPath: String? = nil, flashUntil: Date? = nil) {
         // hook 事件可能早于 session 文件落盘；先建占位，后续 JSONL 再补齐详情。
         if let rawSessionId, !rawSessionId.isEmpty {
             let id = "\(runtime.rawValue):\(rawSessionId)"
             if let existing = sessions[id], PathUtils.isIgnoredProjectPath(existing.projectPath) {
                 return
             }
+            let transcriptURL = transcriptURL(from: transcriptPath)
             if sessions[id] == nil {
                 if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
                    PathUtils.isIgnoredProjectPath(cwd) {
                     return
                 }
-                sessions[id] = placeholderSession(id: id, runtime: runtime, cwd: cwd, eventTime: eventTime)
+                sessions[id] = placeholderSession(id: id, runtime: runtime, cwd: cwd, transcriptURL: transcriptURL, eventTime: eventTime)
+            } else if let transcriptURL, var existing = sessions[id], existing.fileURL != transcriptURL {
+                // Codex hook 自带 transcript_path；保存它后，FSEvents 漏事件时也能按 running 会话补读文件。
+                existing.fileURL = transcriptURL
+                if existing.fileOffset == 0 {
+                    existing.fileOffset = transcriptOffsetBaseline(for: transcriptURL)
+                }
+                sessions[id] = existing
             }
             setStatus(id: id, status: status, eventTime: eventTime, flashUntil: flashUntil)
             return
@@ -236,7 +202,7 @@ final class SessionStore: ObservableObject {
         setStatus(id: target.id, status: status, eventTime: eventTime, flashUntil: flashUntil)
     }
 
-    private func placeholderSession(id: String, runtime: RuntimeKind, cwd: String?, eventTime: Date) -> Session {
+    private func placeholderSession(id: String, runtime: RuntimeKind, cwd: String?, transcriptURL: URL?, eventTime: Date) -> Session {
         let projectPath = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
             ?? PathUtils.sessionsDir(for: runtime).path
         return Session(
@@ -248,19 +214,30 @@ final class SessionStore: ObservableObject {
             lastActivity: eventTime,
             lastEventTimestamp: eventTime,
             activeStartedAt: nil,
-            activeStartedTokenTotal: nil,
-            tpsSampleTokenTotal: nil,
-            tpsSampleTimestamp: nil,
-            currentTPS: nil,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            lastTokenTotal: 0,
-            fileURL: PathUtils.sessionsDir(for: runtime),
-            fileOffset: 0,
+            fileURL: transcriptURL ?? PathUtils.sessionsDir(for: runtime),
+            fileOffset: transcriptOffsetBaseline(for: transcriptURL),
             completedFlashUntil: nil,
             lastDuration: nil
         )
+    }
+
+    private func transcriptURL(from path: String?) -> URL? {
+        guard let path = path?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private func transcriptOffsetBaseline(for url: URL?) -> UInt64 {
+        guard
+            let url,
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+            let size = attributes[.size] as? UInt64
+        else {
+            return 0
+        }
+        // hook 触发前已有的历史 transcript 不需要补读，避免长会话首次处理卡顿。
+        return size
     }
 
     func tickIdle(now: Date = Date()) {
@@ -361,13 +338,6 @@ final class SessionStore: ObservableObject {
         latestFailure = FailureNotice(session: session)
     }
 
-    private func totalTokens(for session: Session) -> Int {
-        max(
-            session.lastTokenTotal,
-            session.inputTokens + session.outputTokens + session.cacheReadTokens
-        )
-    }
-
     nonisolated private static func loadDouble(forKey key: String, fallback: Double) -> Double {
         guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
         return UserDefaults.standard.double(forKey: key)
@@ -375,12 +345,6 @@ final class SessionStore: ObservableObject {
 
     nonisolated private static func clampedNineGridAnimationInterval(_ value: Double) -> Double {
         min(maxNineGridAnimationInterval, max(minNineGridAnimationInterval, value))
-    }
-
-    private func averageTPS(for groups: [ProjectGroup], now: Date) -> Double? {
-        let samples = groups.compactMap { $0.averageTPS(now: now) }
-        guard !samples.isEmpty else { return nil }
-        return samples.reduce(0, +) / Double(samples.count)
     }
 }
 

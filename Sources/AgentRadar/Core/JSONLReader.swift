@@ -2,10 +2,6 @@ import Foundation
 
 struct JSONLEntrySummary {
     let timestamp: Date
-    let inputTokens: Int
-    let outputTokens: Int
-    let cacheReadTokens: Int
-    let totalTokens: Int?
     let cwd: String?
 }
 
@@ -86,18 +82,8 @@ enum JSONLReader {
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let cwd = obj["cwd"] as? String
 
-        let message = obj["message"] as? [String: Any]
-        let usage = message?["usage"] as? [String: Any]
-        let inputTokens = (usage?["input_tokens"] as? Int) ?? 0
-        let outputTokens = (usage?["output_tokens"] as? Int) ?? 0
-        let cacheRead = (usage?["cache_read_input_tokens"] as? Int) ?? 0
-
         return JSONLEntrySummary(
             timestamp: timestamp,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            cacheReadTokens: cacheRead,
-            totalTokens: nil,
             cwd: cwd
         )
     }
@@ -106,30 +92,12 @@ enum JSONLReader {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
         }
-        // Codex 状态只信 hook；JSONL 只补项目和 token，避免回到文件增长推断。
+        // Codex 状态只信 hook；JSONL 只补项目路径，避免回到文件增长推断。
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let type = obj["type"] as? String
         let payload = obj["payload"] as? [String: Any]
 
-        var inputTokens = 0
-        var outputTokens = 0
-        var cacheReadTokens = 0
-        var totalTokens: Int?
         var cwd = payload?["cwd"] as? String
-
-        if type == "event_msg", let eventType = payload?["type"] as? String {
-            switch eventType {
-            case "token_count":
-                if let usage = (payload?["info"] as? [String: Any])?["total_token_usage"] as? [String: Any] {
-                    inputTokens = int(usage["input_tokens"])
-                    outputTokens = int(usage["output_tokens"])
-                    cacheReadTokens = int(usage["cached_input_tokens"])
-                    totalTokens = int(usage["total_tokens"])
-                }
-            default:
-                break
-            }
-        }
 
         if type == "turn_context" {
             cwd = payload?["cwd"] as? String
@@ -137,10 +105,6 @@ enum JSONLReader {
 
         return JSONLEntrySummary(
             timestamp: timestamp,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens,
-            totalTokens: totalTokens,
             cwd: cwd
         )
     }
@@ -174,13 +138,6 @@ enum JSONLReader {
         }
 
         return .pending
-    }
-
-    private static func int(_ value: Any?) -> Int {
-        if let intValue = value as? Int { return intValue }
-        if let doubleValue = value as? Double { return Int(doubleValue) }
-        if let numberValue = value as? NSNumber { return numberValue.intValue }
-        return 0
     }
 
     private static func completeLines(in data: Data) -> (lines: [Data], lastNewline: Int) {

@@ -52,14 +52,6 @@ struct Session: Identifiable, Equatable {
     var lastActivity: Date
     var lastEventTimestamp: Date
     var activeStartedAt: Date?
-    var activeStartedTokenTotal: Int?
-    var tpsSampleTokenTotal: Int?
-    var tpsSampleTimestamp: Date?
-    var currentTPS: Double?
-    var inputTokens: Int
-    var outputTokens: Int
-    var cacheReadTokens: Int
-    var lastTokenTotal: Int
     var fileURL: URL
     var fileOffset: UInt64
     var completedFlashUntil: Date?
@@ -71,22 +63,11 @@ struct CompletionNotice: Identifiable, Equatable {
     let runtime: RuntimeKind
     let projectName: String
     let duration: TimeInterval?
-    let totalTokens: Int
-    let inputTokens: Int
-    let outputTokens: Int
-    let cacheReadTokens: Int
 
     init(session: Session) {
         runtime = session.runtime
         projectName = session.projectName
         duration = session.lastDuration
-        inputTokens = session.inputTokens
-        outputTokens = session.outputTokens
-        cacheReadTokens = session.cacheReadTokens
-        totalTokens = max(
-            session.lastTokenTotal,
-            session.inputTokens + session.outputTokens + session.cacheReadTokens
-        )
     }
 }
 
@@ -111,11 +92,11 @@ extension CompletionNotice {
     }
 
     var messageText: String {
-        "\(projectName) 任务完成，请及时审阅"
+        "任务完成，请及时审阅"
     }
 
     var notificationBodyText: String {
-        messageText
+        [messageText, durationText].compactMap { $0 }.joined(separator: "\n")
     }
 
     var durationText: String? {
@@ -145,7 +126,7 @@ extension FailureNotice {
     }
 
     var messageText: String {
-        "\(projectName) 任务失败，请及时审阅"
+        "任务失败，请及时审阅"
     }
 
     var notificationBodyText: String {

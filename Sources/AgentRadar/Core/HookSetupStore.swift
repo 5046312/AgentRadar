@@ -422,7 +422,6 @@ enum HookConfigurationManager {
         guard let nestedHooks = entry["hooks"] as? [[String: Any]] else {
             return false
         }
-        let marker = "record-hook \(runtime.rawValue) \(event)"
         return nestedHooks.contains { hook in
             guard
                 (hook["type"] as? String) == "command",
@@ -430,7 +429,12 @@ enum HookConfigurationManager {
             else {
                 return false
             }
-            return command.contains("AgentRadar") && command.contains(marker)
+            // 早期安装器写入的命令会带 shell 引号，不能只按完整 marker 文本匹配，
+            // 否则重装时无法清掉旧 AgentRadar hook，最终同一事件会被重复记录多次。
+            return command.contains("AgentRadar")
+                && command.contains("record-hook")
+                && command.contains(runtime.rawValue)
+                && command.contains(event)
         }
     }
 

@@ -160,6 +160,7 @@ final class HookEventReader {
             status: status,
             eventTime: eventTime,
             cwd: event.cwd,
+            transcriptPath: event.transcript_path,
             flashUntil: flashUntil
         )
     }

@@ -8,6 +8,8 @@ final class SessionMonitor {
     private var idleTimer: Timer?
     private let initialScanFileLimit = 80
     private let initialScanTailBytes: UInt64 = 64 * 1024
+    private let eventScanDirectoryLimit = 40
+    private let eventScanFileLimit = 20
 
     init(store: SessionStore) {
         self.store = store
@@ -96,14 +98,6 @@ final class SessionMonitor {
             lastActivity: Date.distantPast,
             lastEventTimestamp: Date.distantPast,
             activeStartedAt: nil,
-            activeStartedTokenTotal: nil,
-            tpsSampleTokenTotal: nil,
-            tpsSampleTimestamp: nil,
-            currentTPS: nil,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            lastTokenTotal: 0,
             fileURL: url,
             fileOffset: 0,
             completedFlashUntil: nil,
@@ -131,7 +125,6 @@ final class SessionMonitor {
                 session.projectPath = cwd
                 session.projectName = PathUtils.projectNameFromPath(cwd)
             }
-            applyTokenSummary(summary, to: &session)
         }
 
         // Codex 访问内部 memory 仓库时也会写 hook / transcript；这些不是用户项目，直接忽略。
@@ -177,59 +170,6 @@ final class SessionMonitor {
         }
     }
 
-    private func applyTokenSummary(_ summary: JSONLEntrySummary, to session: inout Session) {
-        let previousTotal = totalTokens(for: session)
-        if let totalTokens = summary.totalTokens {
-            session.inputTokens = summary.inputTokens
-            session.outputTokens = summary.outputTokens
-            session.cacheReadTokens = summary.cacheReadTokens
-            session.lastTokenTotal = totalTokens
-            updateCurrentTPS(previousTotal: previousTotal, currentTotal: totalTokens, timestamp: summary.timestamp, session: &session)
-            return
-        }
-        guard summary.inputTokens > 0 || summary.outputTokens > 0 || summary.cacheReadTokens > 0 else {
-            return
-        }
-
-        session.inputTokens += summary.inputTokens
-        session.outputTokens += summary.outputTokens
-        session.cacheReadTokens += summary.cacheReadTokens
-        session.lastTokenTotal = session.inputTokens + session.outputTokens + session.cacheReadTokens
-        updateCurrentTPS(previousTotal: previousTotal, currentTotal: session.lastTokenTotal, timestamp: summary.timestamp, session: &session)
-    }
-
-    private func updateCurrentTPS(previousTotal: Int, currentTotal: Int, timestamp: Date, session: inout Session) {
-        guard currentTotal > previousTotal else { return }
-
-        guard
-            let previousSampleTotal = session.tpsSampleTokenTotal,
-            let previousSampleTimestamp = session.tpsSampleTimestamp
-        else {
-            session.tpsSampleTokenTotal = currentTotal
-            session.tpsSampleTimestamp = timestamp
-            return
-        }
-
-        let elapsed = timestamp.timeIntervalSince(previousSampleTimestamp)
-        guard elapsed > 0 else {
-            session.tpsSampleTokenTotal = currentTotal
-            session.tpsSampleTimestamp = timestamp
-            return
-        }
-
-        // 运行中 TPS 只在 token 计数真实变化时刷新，避免“没有新 token 但时间增加”造成假低速。
-        session.currentTPS = Double(currentTotal - previousSampleTotal) / elapsed
-        session.tpsSampleTokenTotal = currentTotal
-        session.tpsSampleTimestamp = timestamp
-    }
-
-    private func totalTokens(for session: Session) -> Int {
-        max(
-            session.lastTokenTotal,
-            session.inputTokens + session.outputTokens + session.cacheReadTokens
-        )
-    }
-
     private func refreshDerivedStatus(_ session: inout Session, runtime: RuntimeKind) {
         let now = Date()
         if runtime == .claude {
@@ -270,7 +210,7 @@ final class SessionMonitor {
             &context,
             [path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.5,
+            0.2,
             UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
         )
         if let stream = stream {
@@ -281,11 +221,86 @@ final class SessionMonitor {
     }
 
     private func handleFSEvents(_ paths: [String]) {
-        for p in paths where p.hasSuffix(".jsonl") {
-            let url = URL(fileURLWithPath: p)
-            guard let runtime = runtime(for: url) else { continue }
-            ingestFile(url, runtime: runtime)
+        var ingestedPaths = Set<String>()
+        for path in paths {
+            let changedURL = URL(fileURLWithPath: path)
+            let changedRuntime = runtime(for: changedURL)
+            let urls = changedRuntime == .codex && changedURL.pathExtension != "jsonl"
+                ? activeSessionJSONLFiles(under: changedURL, runtime: .codex)
+                : jsonlURLsForChangedPath(changedURL)
+
+            for url in urls {
+                guard ingestedPaths.insert(url.path).inserted else { continue }
+                guard let runtime = runtime(for: url) else { continue }
+                ingestFile(url, runtime: runtime)
+            }
         }
+    }
+
+    private func activeSessionJSONLFiles(under rootURL: URL, runtime: RuntimeKind) -> [URL] {
+        let rootPath = rootURL.path
+        return store.sessions.values.compactMap { session in
+            guard session.runtime == runtime, session.status == .running, session.fileURL.pathExtension == "jsonl" else {
+                return nil
+            }
+            let filePath = session.fileURL.path
+            guard filePath == rootPath || filePath.hasPrefix(rootPath + "/") else {
+                return nil
+            }
+            // Codex hook 已带 transcript_path；目录事件只补读已知运行中会话，避免扫整棵 sessions 历史目录。
+            return session.fileURL
+        }
+    }
+
+    private func jsonlURLsForChangedPath(_ url: URL) -> [URL] {
+        if url.pathExtension == "jsonl" {
+            return [url]
+        }
+
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return []
+        }
+
+        return recentJSONLFiles(under: url)
+    }
+
+    private func recentJSONLFiles(under rootURL: URL) -> [URL] {
+        var queue = [rootURL]
+        var scannedDirectoryCount = 0
+        var candidates: [(url: URL, modifiedAt: Date)] = []
+
+        while !queue.isEmpty, scannedDirectoryCount < eventScanDirectoryLimit, candidates.count < eventScanFileLimit {
+            let currentURL = queue.removeFirst()
+            scannedDirectoryCount += 1
+
+            guard let children = try? FileManager.default.contentsOfDirectory(
+                at: currentURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            var childDirectories: [(url: URL, modifiedAt: Date)] = []
+            for child in children {
+                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+                let modifiedAt = values?.contentModificationDate ?? .distantPast
+                if values?.isDirectory == true {
+                    childDirectories.append((child, modifiedAt))
+                } else if child.pathExtension == "jsonl" {
+                    candidates.append((child, modifiedAt))
+                }
+            }
+
+            // FSEvents 有时只给父目录；优先扫最近变动目录，避免 sessions 历史很多时误扫太深。
+            queue.append(contentsOf: childDirectories.sorted { $0.modifiedAt > $1.modifiedAt }.map { $0.url })
+        }
+
+        return candidates
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .prefix(eventScanFileLimit)
+            .map { $0.url }
     }
 
     private func runtime(for url: URL) -> RuntimeKind? {

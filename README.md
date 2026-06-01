@@ -11,9 +11,8 @@ AgentRadar is a native macOS menu bar monitor for Claude Code and Codex project 
 ## Features
 
 - Fixed 3x3 menu bar indicator with active-task badge.
-- Running animation lights cells cumulatively, then clears and restarts.
-- Each newly lit cell is colored by TPS trend for that interval: green for faster, yellow for slight/no drop, red for large drop.
-- Popover shows runtime tabs, all-project average TPS, project-level TPS, and project-level status.
+- Running indicator lights green gradient cells from the configured base speed with subtle breathing timing, then restarts from the first cell after all 9 cells are lit.
+- Popover shows runtime tabs and project-level status.
 - Completion and failure reminders via status bar bubble or system notification.
 - In-app hook installer with diff preview before writing.
 - Native Swift/AppKit/SwiftUI app with no third-party runtime dependencies.
@@ -21,7 +20,7 @@ AgentRadar is a native macOS menu bar monitor for Claude Code and Codex project 
 ## Status Source
 
 - Claude reads `~/.claude/projects/**/*.jsonl` and uses hooks for more reliable waiting/completion states.
-- Codex status depends on hooks only. JSONL files only fill project and token details.
+- Codex status depends on hooks only. JSONL files fill project and session details.
 - Hook events are appended to `~/.agentradar/events.jsonl`.
 - Internal Codex memory paths and root-level internal tasks are ignored so they do not appear as user projects.
 
@@ -66,7 +65,7 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 - Reminder style: status bar bubble or system notification.
 - Sound: toggle completion sound.
-- Nine-grid speed: adjustable between `0.18` and `0.54` seconds per cell.
+- Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted in settings.
 
 ## Package DMG
 
