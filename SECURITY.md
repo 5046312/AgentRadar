@@ -6,4 +6,4 @@ Please open a private security advisory on GitHub if available. If not, open an 
 
 ## Data handling
 
-AgentRadar reads local Claude Code session files and optional hook events. It does not send data over the network.
+AgentRadar reads local Claude Code / Codex session files and local hook events. It does not send data over the network.

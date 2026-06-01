@@ -21,6 +21,7 @@ struct ProjectGroup: Identifiable {
 final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
+    @Published private(set) var latestCompletion: CompletionNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: "soundEnabled")
 
     var sortedSessions: [Session] {
@@ -33,8 +34,13 @@ final class SessionStore: ObservableObject {
     }
 
     var projectGroups: [ProjectGroup] {
+        projectGroups(runtime: nil)
+    }
+
+    func projectGroups(runtime: RuntimeKind?) -> [ProjectGroup] {
         var groups: [String: ProjectGroup] = [:]
         for s in sessions.values {
+            if let runtime, s.runtime != runtime { continue }
             if groups[s.projectPath] == nil {
                 groups[s.projectPath] = ProjectGroup(id: s.projectPath, name: s.projectName, path: s.projectPath, sessions: [])
             }
@@ -58,6 +64,14 @@ final class SessionStore: ObservableObject {
         return result
     }
 
+    func count(_ status: SessionStatus, runtime: RuntimeKind) -> Int {
+        sessions.values.filter { $0.runtime == runtime && $0.status == status }.count
+    }
+
+    func hasSessions(runtime: RuntimeKind) -> Bool {
+        sessions.values.contains { $0.runtime == runtime }
+    }
+
     var aggregateStatus: SessionStatus {
         let statuses = sessions.values.map(\.status)
         if statuses.contains(.error) { return .error }
@@ -68,7 +82,8 @@ final class SessionStore: ObservableObject {
     }
 
     var activeCount: Int {
-        sessions.values.filter { $0.status == .running || $0.status == .waiting }.count
+        // 状态栏按钮只展示真正执行中的任务数，等待输入不算正在执行。
+        sessions.values.filter { $0.status == .running }.count
     }
 
     func upsert(_ session: Session) {
@@ -76,7 +91,7 @@ final class SessionStore: ObservableObject {
         sessions[session.id] = session
         version &+= 1
         if session.status == .completed && oldStatus != .completed {
-            playCompletionSound()
+            publishCompletion(session)
         }
     }
 
@@ -87,20 +102,84 @@ final class SessionStore: ObservableObject {
         sessions[id] = s
         version &+= 1
         if s.status == .completed && oldStatus != .completed {
-            playCompletionSound()
+            publishCompletion(s)
         }
     }
 
-    func setStatus(id: String, status: SessionStatus, flashUntil: Date? = nil) {
+    func setStatus(id: String, status: SessionStatus, eventTime: Date = Date(), flashUntil: Date? = nil) {
         guard var s = sessions[id] else { return }
         let oldStatus = s.status
         s.status = status
+        s.lastEventTimestamp = eventTime
+        s.lastActivity = max(s.lastActivity, eventTime)
+        if status == .running, oldStatus != .running {
+            s.activeStartedAt = eventTime
+            s.lastDuration = nil
+        }
+        if status == .completed, oldStatus != .completed, let startedAt = s.activeStartedAt {
+            s.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
+        }
         if let f = flashUntil { s.completedFlashUntil = f }
         sessions[id] = s
         version &+= 1
         if status == .completed && oldStatus != .completed {
-            playCompletionSound()
+            publishCompletion(s)
         }
+    }
+
+    func setHookStatus(runtime: RuntimeKind, rawSessionId: String?, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, flashUntil: Date? = nil) {
+        // hook 事件可能早于 session 文件落盘；先建占位，后续 JSONL 再补齐详情。
+        if let rawSessionId, !rawSessionId.isEmpty {
+            let id = "\(runtime.rawValue):\(rawSessionId)"
+            if sessions[id] == nil {
+                sessions[id] = placeholderSession(id: id, runtime: runtime, cwd: cwd, eventTime: eventTime)
+            }
+            setStatus(id: id, status: status, eventTime: eventTime, flashUntil: flashUntil)
+            return
+        }
+        setRuntimeStatus(runtime: runtime, status: status, eventTime: eventTime, cwd: cwd, flashUntil: flashUntil)
+    }
+
+    func setRuntimeStatus(runtime: RuntimeKind, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, flashUntil: Date? = nil) {
+        // Codex hook 可能只带 cwd，不带 session_id；用 cwd 缩小范围后取最近活跃会话。
+        let candidates = sessions.values.filter { session in
+            guard session.runtime == runtime else { return false }
+            guard let cwd, !cwd.isEmpty else { return true }
+            return session.projectPath == cwd
+        }
+        guard let target = candidates.sorted(by: { lhs, rhs in
+            lhs.lastActivity > rhs.lastActivity
+        }).first else {
+            return
+        }
+        setStatus(id: target.id, status: status, eventTime: eventTime, flashUntil: flashUntil)
+    }
+
+    private func placeholderSession(id: String, runtime: RuntimeKind, cwd: String?, eventTime: Date) -> Session {
+        let projectPath = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            ?? PathUtils.sessionsDir(for: runtime).path
+        return Session(
+            id: id,
+            runtime: runtime,
+            projectPath: projectPath,
+            projectName: PathUtils.projectNameFromPath(projectPath),
+            gitBranch: nil,
+            status: .idle,
+            lastActivity: eventTime,
+            lastEventTimestamp: eventTime,
+            activeStartedAt: nil,
+            currentTool: nil,
+            taskTitle: nil,
+            lastAssistantText: nil,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            lastTokenTotal: 0,
+            fileURL: PathUtils.sessionsDir(for: runtime),
+            fileOffset: 0,
+            completedFlashUntil: nil,
+            lastDuration: nil
+        )
     }
 
     func tickIdle(now: Date = Date()) {
@@ -115,7 +194,9 @@ final class SessionStore: ObservableObject {
             }
             if s.status == .running {
                 let elapsed = now.timeIntervalSince(s.lastEventTimestamp)
-                if elapsed > 30 {
+                // Codex running 只靠 hook 刷新，长思考期可能没有文件变化；这里保留更长兜底。
+                let idleTimeout: TimeInterval = s.runtime == .codex ? 5 * 60 : 30
+                if elapsed > idleTimeout {
                     s.status = .idle
                     sessions[id] = s
                     changed = true
@@ -133,6 +214,12 @@ final class SessionStore: ObservableObject {
     private func playCompletionSound() {
         guard soundEnabled else { return }
         NSSound(named: "Glass")?.play()
+    }
+
+    private func publishCompletion(_ session: Session) {
+        // 完成提示和音效共用同一次状态跃迁，避免 JSONL 补写内容时重复弹出。
+        latestCompletion = CompletionNotice(session: session)
+        playCompletionSound()
     }
 }
 
@@ -165,5 +252,11 @@ extension SessionStatus {
         case .completed: return "已完成"
         case .idle:      return "空闲"
         }
+    }
+}
+
+private extension String {
+    var nonEmpty: String? {
+        isEmpty ? nil : self
     }
 }

@@ -74,20 +74,21 @@ final class HookEventReader {
     }
 
     private func apply(_ event: HookEvent) {
-        guard let sid = event.session_id else { return }
+        let runtime = event.runtime ?? .claude
+        let eventTime = Date(timeIntervalSince1970: event.ts)
         switch event.event {
         case "Stop", "SubagentStop":
-            store.setStatus(id: sid, status: .completed, flashUntil: Date().addingTimeInterval(3))
-        case "Notification":
-            store.setStatus(id: sid, status: .waiting)
-        case "UserPromptSubmit", "PreToolUse", "PostToolUse":
-            store.update(id: sid) { s in
-                s.status = .running
-                s.lastEventTimestamp = Date(timeIntervalSince1970: event.ts)
-                s.lastActivity = s.lastEventTimestamp
-            }
+            applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+        case "Notification", "PermissionRequest":
+            applyStatus(.waiting, event: event, runtime: runtime, eventTime: eventTime)
+        case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse":
+            applyStatus(.running, event: event, runtime: runtime, eventTime: eventTime)
         default:
             break
         }
+    }
+
+    private func applyStatus(_ status: SessionStatus, event: HookEvent, runtime: RuntimeKind, eventTime: Date, flashUntil: Date? = nil) {
+        store.setHookStatus(runtime: runtime, rawSessionId: event.session_id, status: status, eventTime: eventTime, cwd: event.cwd, flashUntil: flashUntil)
     }
 }

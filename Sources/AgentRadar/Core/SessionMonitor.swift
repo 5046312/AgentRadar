@@ -4,7 +4,7 @@ import CoreServices
 @MainActor
 final class SessionMonitor {
     private let store: SessionStore
-    private var stream: FSEventStreamRef?
+    private var streams: [FSEventStreamRef] = []
     private var idleTimer: Timer?
 
     init(store: SessionStore) {
@@ -12,110 +12,194 @@ final class SessionMonitor {
     }
 
     func start() {
-        let dir = PathUtils.claudeProjectsDir
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        scanInitial()
-        startFSEvents(path: dir.path)
+        for runtime in RuntimeKind.allCases {
+            let dir = PathUtils.sessionsDir(for: runtime)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            scanInitial(runtime: runtime)
+            startFSEvents(path: dir.path)
+        }
         idleTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.tickIdle() }
         }
     }
 
     func stop() {
-        if let s = stream {
+        for s in streams {
             FSEventStreamStop(s)
             FSEventStreamInvalidate(s)
             FSEventStreamRelease(s)
-            stream = nil
         }
+        streams.removeAll()
         idleTimer?.invalidate()
         idleTimer = nil
     }
 
-    private func scanInitial() {
-        let dir = PathUtils.claudeProjectsDir
+    private func scanInitial(runtime: RuntimeKind) {
+        switch runtime {
+        case .claude:
+            scanClaudeInitial()
+        case .codex:
+            scanCodexInitial()
+        }
+    }
+
+    private func scanClaudeInitial() {
+        let dir = PathUtils.sessionsDir(for: .claude)
         guard let projects = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
         for project in projects {
             let projectDir = dir.appendingPathComponent(project)
-            scanProjectDir(projectDir)
+            scanClaudeProjectDir(projectDir)
         }
     }
 
-    private func scanProjectDir(_ dir: URL) {
+    private func scanClaudeProjectDir(_ dir: URL) {
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
         for f in files where f.hasSuffix(".jsonl") {
             let url = dir.appendingPathComponent(f)
-            ingestFile(url, fullScan: true)
+            ingestFile(url, runtime: .claude, fullScan: true)
         }
     }
 
-    private func ingestFile(_ url: URL, fullScan: Bool) {
-        let sessionId = (url.lastPathComponent as NSString).deletingPathExtension
-        let projectDirName = url.deletingLastPathComponent().lastPathComponent
-        let projectPath = PathUtils.decodeProjectDir(projectDirName)
+    private func scanCodexInitial() {
+        let dir = PathUtils.sessionsDir(for: .codex)
+        guard let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) else { return }
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            ingestFile(url, runtime: .codex, fullScan: true)
+        }
+    }
+
+    private func ingestFile(_ url: URL, runtime: RuntimeKind, fullScan: Bool) {
+        let rawSessionId = rawSessionId(for: url, runtime: runtime)
+        let sessionId = "\(runtime.rawValue):\(rawSessionId)"
+        let projectPath = initialProjectPath(for: url, runtime: runtime)
         let projectName = PathUtils.projectNameFromPath(projectPath)
 
         let existing = store.sessions[sessionId]
         var session = existing ?? Session(
             id: sessionId,
+            runtime: runtime,
             projectPath: projectPath,
             projectName: projectName,
             gitBranch: nil,
             status: .idle,
             lastActivity: Date.distantPast,
             lastEventTimestamp: Date.distantPast,
+            activeStartedAt: nil,
             currentTool: nil,
+            taskTitle: nil,
             lastAssistantText: nil,
             inputTokens: 0,
             outputTokens: 0,
             cacheReadTokens: 0,
+            lastTokenTotal: 0,
             fileURL: url,
             fileOffset: 0,
-            completedFlashUntil: nil
+            completedFlashUntil: nil,
+            lastDuration: nil
         )
+        session.fileURL = url
 
         let startOffset = fullScan ? 0 : session.fileOffset
-        let (lines, newOffset) = JSONLReader.readNewLines(from: url, startingAt: startOffset)
+        let readResult = runtime == .codex && fullScan
+            ? JSONLReader.readTailLines(from: url, maxLines: 16)
+            : JSONLReader.readNewLines(from: url, startingAt: startOffset)
+        let lines = readResult.lines
+        let newOffset = readResult.newOffset
         session.fileOffset = newOffset
 
         guard !lines.isEmpty else {
+            refreshDerivedStatus(&session, runtime: runtime)
             if existing == nil { store.upsert(session) }
             return
         }
 
-        var lastSummary: JSONLEntrySummary?
         for line in lines {
-            guard let summary = JSONLReader.parseSummary(line) else { continue }
-            lastSummary = summary
-            session.lastEventTimestamp = summary.timestamp
+            guard let summary = parseSummary(line, runtime: runtime) else { continue }
             session.lastActivity = max(session.lastActivity, summary.timestamp)
+            if runtime == .claude || session.status == .idle {
+                session.lastEventTimestamp = summary.timestamp
+            }
+            if let cwd = summary.cwd, !cwd.isEmpty {
+                session.projectPath = cwd
+                session.projectName = PathUtils.projectNameFromPath(cwd)
+            }
             if let b = summary.gitBranch { session.gitBranch = b }
             if let tool = summary.toolName { session.currentTool = tool }
+            if let txt = summary.userText, !txt.isEmpty {
+                session.taskTitle = String(txt.prefix(120))
+            }
             if let txt = summary.assistantText, !txt.isEmpty {
                 session.lastAssistantText = String(txt.prefix(200))
             }
-            session.inputTokens += summary.inputTokens
-            session.outputTokens += summary.outputTokens
-            session.cacheReadTokens += summary.cacheReadTokens
+            applyTokenSummary(summary, to: &session)
         }
 
-        let elapsed = Date().timeIntervalSince(session.lastEventTimestamp)
-
-        if fullScan {
-            // 启动时全部设为 idle
-            session.status = .idle
-        } else {
-            if let last = lastSummary {
-                // 实时监控：30秒内算运行中，否则 idle
-                if elapsed <= 30 {
-                    session.status = .running
-                } else {
-                    session.status = .idle
-                }
-            }
-        }
+        refreshDerivedStatus(&session, runtime: runtime)
 
         store.upsert(session)
+    }
+
+    private func rawSessionId(for url: URL, runtime: RuntimeKind) -> String {
+        let fileName = (url.lastPathComponent as NSString).deletingPathExtension
+        guard runtime == .codex else { return fileName }
+        let suffix = String(fileName.suffix(36))
+        // Codex hook 上报的是 session UUID；rollout 文件名后缀同一 UUID，需对齐才能精准更新。
+        return UUID(uuidString: suffix) == nil ? fileName : suffix
+    }
+
+    private func initialProjectPath(for url: URL, runtime: RuntimeKind) -> String {
+        switch runtime {
+        case .claude:
+            let projectDirName = url.deletingLastPathComponent().lastPathComponent
+            return PathUtils.decodeProjectDir(projectDirName)
+        case .codex:
+            return PathUtils.sessionsDir(for: .codex).path
+        }
+    }
+
+    private func parseSummary(_ data: Data, runtime: RuntimeKind) -> JSONLEntrySummary? {
+        switch runtime {
+        case .claude:
+            return JSONLReader.parseSummary(data)
+        case .codex:
+            return JSONLReader.parseCodexSummary(data)
+        }
+    }
+
+    private func applyTokenSummary(_ summary: JSONLEntrySummary, to session: inout Session) {
+        if let totalTokens = summary.totalTokens {
+            session.inputTokens = summary.inputTokens
+            session.outputTokens = summary.outputTokens
+            session.cacheReadTokens = summary.cacheReadTokens
+            session.lastTokenTotal = totalTokens
+            return
+        }
+        guard summary.inputTokens > 0 || summary.outputTokens > 0 || summary.cacheReadTokens > 0 else {
+            return
+        }
+
+        session.inputTokens += summary.inputTokens
+        session.outputTokens += summary.outputTokens
+        session.cacheReadTokens += summary.cacheReadTokens
+        session.lastTokenTotal = session.inputTokens + session.outputTokens + session.cacheReadTokens
+    }
+
+    private func refreshDerivedStatus(_ session: inout Session, runtime: RuntimeKind) {
+        let now = Date()
+        if runtime == .claude {
+            if session.status == .completed, let until = session.completedFlashUntil, now <= until {
+                return
+            }
+            // 启动恢复只保留 Claude 近期状态，避免旧会话误亮。
+            if now.timeIntervalSince(session.lastEventTimestamp) > 30 {
+                session.status = .idle
+                if session.completedFlashUntil != nil, now > (session.completedFlashUntil ?? now) {
+                    session.completedFlashUntil = nil
+                }
+            }
+            return
+        }
+        // Codex 状态由 hooks 写入，session JSONL 只更新展示信息。
     }
 
     private func startFSEvents(path: String) {
@@ -146,14 +230,22 @@ final class SessionMonitor {
         if let stream = stream {
             FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
             FSEventStreamStart(stream)
-            self.stream = stream
+            streams.append(stream)
         }
     }
 
     private func handleFSEvents(_ paths: [String]) {
         for p in paths where p.hasSuffix(".jsonl") {
             let url = URL(fileURLWithPath: p)
-            ingestFile(url, fullScan: false)
+            guard let runtime = runtime(for: url) else { continue }
+            ingestFile(url, runtime: runtime, fullScan: false)
         }
+    }
+
+    private func runtime(for url: URL) -> RuntimeKind? {
+        let path = url.path
+        if path.hasPrefix(PathUtils.sessionsDir(for: .claude).path) { return .claude }
+        if path.hasPrefix(PathUtils.sessionsDir(for: .codex).path) { return .codex }
+        return nil
     }
 }

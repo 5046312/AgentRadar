@@ -13,9 +13,6 @@ struct SessionRow: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(session.projectName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
                     if let branch = session.gitBranch {
                         Text(branch)
                             .font(.system(size: 10))
@@ -24,27 +21,30 @@ struct SessionRow: View {
                             .padding(.vertical, 1)
                             .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
                     }
+                    Text(primaryTitle)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(hasPrimaryTitle ? Color.primary : Color.secondary)
+                        .lineLimit(1)
                     Spacer()
                     Text(session.status.label)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Color(nsColor: session.status.color))
                 }
-                if let tool = session.currentTool {
-                    Text("→ " + tool)
+                if let detail = detailText {
+                    Text(detail)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                } else if let txt = session.lastAssistantText, !txt.isEmpty {
-                    Text(txt)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
                 }
                 HStack(spacing: 8) {
                     Text(relativeTime(session.lastEventTimestamp))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    if session.outputTokens > 0 {
+                    if session.lastTokenTotal > 0 {
+                        Text("\(formatTokens(session.lastTokenTotal)) tokens")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    } else if session.outputTokens > 0 {
                         Text("\(formatTokens(session.outputTokens)) out")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
@@ -63,6 +63,33 @@ struct SessionRow: View {
         .onTapGesture {
             NSWorkspace.shared.open(URL(fileURLWithPath: session.projectPath))
         }
+    }
+
+    private var primaryTitle: String {
+        // 旧会话可能只有状态和 token；占位文案让行首不再空白。
+        titleText ?? "暂无任务内容"
+    }
+
+    private var hasPrimaryTitle: Bool {
+        titleText != nil
+    }
+
+    private var titleText: String? {
+        trimmed(session.taskTitle)
+            ?? trimmed(session.lastAssistantText)
+            ?? trimmed(session.currentTool).map { "→ " + $0 }
+    }
+
+    private var detailText: String? {
+        if let tool = trimmed(session.currentTool), trimmed(session.taskTitle) != nil || trimmed(session.lastAssistantText) != nil {
+            return "→ " + tool
+        }
+        return nil
+    }
+
+    private func trimmed(_ value: String?) -> String? {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text?.isEmpty == false ? text : nil
     }
 
     private func relativeTime(_ date: Date) -> String {

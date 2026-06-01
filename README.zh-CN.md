@@ -6,22 +6,22 @@
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar 是一个 macOS 菜单栏工具，用红绿灯状态监控多个 Claude Code 会话。
+AgentRadar 是一个 macOS 菜单栏工具，用红绿灯状态监控多个 Claude Code 和 Codex 会话。
 
 ## 功能
 
 - 状态栏红绿灯：运行、等待、完成、错误、空闲。
 - 活跃任务数字角标。
 - Popover 展示项目名、git 分支、当前工具、token 使用量、最近活动时间。
-- 读取 `~/.claude/projects/**/*.jsonl`。
-- 可选 hooks 事件源：`~/.agentradar/events.jsonl`。
+- 读取 `~/.claude/projects/**/*.jsonl` 和 `~/.codex/sessions/**/*.jsonl`。
+- hooks 事件源：`~/.agentradar/events.jsonl`。
 - 原生 Swift/AppKit/SwiftUI，无第三方运行依赖。
 
 ## 系统要求
 
 - macOS 14 或更新版本。
 - Swift 5.9 或更新版本。
-- Claude Code。
+- Claude Code / Codex。
 - 可选：`jq`，仅 `install-hooks.sh` 需要。
 
 ## 构建
@@ -33,16 +33,16 @@ open ./AgentRadar.app
 
 `build.sh` 会执行 SwiftPM release 构建，并生成 `AgentRadar.app`。
 
-## 安装 hooks（可选）
+## 安装 hooks
 
-hooks 让等待、完成等状态更可靠：
+Codex 状态依赖 hooks；Claude 的等待、完成等状态也通过 hooks 更可靠：
 
 ```bash
 brew install jq
 ./install-hooks.sh
 ```
 
-脚本会备份 `~/.claude/settings.json`，再注入 `Stop`、`Notification`、`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`SubagentStop` hooks。事件追加到 `~/.agentradar/events.jsonl`。
+脚本会备份并更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
 
 ## 打包 DMG
 
@@ -54,7 +54,7 @@ brew install jq
 
 ## 隐私
 
-AgentRadar 只读取本机 Claude Code 会话文件和可选 hook 事件文件。它不会上传数据，也不包含网络请求。
+AgentRadar 只读取本机 Claude Code / Codex 会话文件和本机 hook 事件文件。它不会上传数据，也不包含网络请求。
 
 ## 开发
 
@@ -72,7 +72,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-如需还原 hooks 配置，使用 `install-hooks.sh` 生成的 `settings.json.bak.<timestamp>` 备份覆盖 `~/.claude/settings.json`。
+如需还原 hooks 配置，使用 `install-hooks.sh` 生成的 `.bak.<timestamp>` 备份覆盖对应配置文件。
 
 ## 许可
 

@@ -6,22 +6,22 @@ English | [简体中文](README.zh-CN.md)
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar is a native macOS menu bar app for watching multiple Claude Code sessions at a glance.
+AgentRadar is a native macOS menu bar app for watching multiple Claude Code and Codex sessions at a glance.
 
 ## Features
 
 - Traffic-light status in the menu bar: running, waiting, completed, error, idle.
 - Active-session badge count.
 - Popover with project name, git branch, current tool, token usage, and recent activity.
-- Reads `~/.claude/projects/**/*.jsonl`.
-- Optional hook event source at `~/.agentradar/events.jsonl`.
+- Reads `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/*.jsonl`.
+- Hook event source at `~/.agentradar/events.jsonl`.
 - Native Swift/AppKit/SwiftUI app with no third-party runtime dependencies.
 
 ## Requirements
 
 - macOS 14 or later.
 - Swift 5.9 or later.
-- Claude Code.
+- Claude Code / Codex.
 - Optional: `jq`, only required by `install-hooks.sh`.
 
 ## Build
@@ -33,16 +33,16 @@ open ./AgentRadar.app
 
 `build.sh` runs a SwiftPM release build and assembles `AgentRadar.app`.
 
-## Install Hooks Optional
+## Install Hooks
 
-Hooks make waiting and completed states more reliable:
+Codex status depends on hooks. Hooks also make Claude waiting and completed states more reliable:
 
 ```bash
 brew install jq
 ./install-hooks.sh
 ```
 
-The script backs up `~/.claude/settings.json`, then injects `Stop`, `Notification`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `SubagentStop` hooks. Events are appended to `~/.agentradar/events.jsonl`.
+The script backs up and updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
 
 ## Package DMG
 
@@ -54,7 +54,7 @@ The script backs up `~/.claude/settings.json`, then injects `Stop`, `Notificatio
 
 ## Privacy
 
-AgentRadar only reads local Claude Code session files and optional local hook events. It does not upload data and contains no network requests.
+AgentRadar only reads local Claude Code / Codex session files and local hook events. It does not upload data and contains no network requests.
 
 ## Development
 
@@ -72,7 +72,7 @@ rm -rf AgentRadar.app .build AgentRadar.dmg
 rm -rf ~/.agentradar
 ```
 
-To restore hook settings, replace `~/.claude/settings.json` with the `settings.json.bak.<timestamp>` backup created by `install-hooks.sh`.
+To restore hook settings, replace the edited config files with the matching `.bak.<timestamp>` backups created by `install-hooks.sh`.
 
 ## License
 
