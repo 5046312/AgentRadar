@@ -277,6 +277,19 @@ private struct HookSettingsView: View {
                 }
             }
 
+            settingsSection("状态栏样式") {
+                Picker("状态栏样式", selection: statusBarStyleBinding) {
+                    ForEach(StatusBarStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+
+                Text(statusBarStyleDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Text("安装前会先显示 diff 预览。确认后直接覆盖目标文件，不再备份；重启当前会话后才生效。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -311,6 +324,15 @@ private struct HookSettingsView: View {
         )
     }
 
+    private var statusBarStyleBinding: Binding<StatusBarStyle> {
+        Binding(
+            get: { sessionStore.statusBarStyle },
+            set: { newValue in
+                sessionStore.setStatusBarStyle(newValue)
+            }
+        )
+    }
+
     private var reminderDescription: String {
         switch sessionStore.reminderStyle {
         case .statusBarBubble:
@@ -318,6 +340,10 @@ private struct HookSettingsView: View {
         case .systemNotification:
             return "任务完成后改用系统消息提醒；若此前拒绝过权限，需要到系统设置里重新开启。"
         }
+    }
+
+    private var statusBarStyleDescription: String {
+        "\(sessionStore.statusBarStyle.detailText) 仅影响状态栏图标，不影响完成提醒方式。"
     }
 
     private func applyReminderStyle(_ style: ReminderStyle) async {

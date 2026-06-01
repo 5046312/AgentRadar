@@ -12,11 +12,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var eventMonitor: Any?
     private var resignObserver: Any?
     private var versionCancellable: AnyCancellable?
+    private var styleCancellable: AnyCancellable?
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var completionCloseTimer: Timer?
-    private var runningPulseTimer: Timer?
-    private var runningPulseDimmed = false
+    private var statusAnimationTimer: Timer?
+    private var statusAnimationStyle: StatusBarStyle?
+    private var statusAnimationStep = 0
 
     init(store: SessionStore) {
         self.store = store
@@ -44,6 +46,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
 
         versionCancellable = store.$version.sink { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        styleCancellable = store.$statusBarStyle.sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
         completionCancellable = store.$latestCompletion.compactMap { $0 }.sink { [weak self] notice in
@@ -121,22 +126,28 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func refresh() {
-        updateRunningPulse()
+        updateStatusAnimation()
         renderStatusItem()
     }
 
-    private func updateRunningPulse() {
+    private func updateStatusAnimation() {
         guard store.aggregateStatus == .running else {
-            runningPulseTimer?.invalidate()
-            runningPulseTimer = nil
-            runningPulseDimmed = false
+            statusAnimationTimer?.invalidate()
+            statusAnimationTimer = nil
+            statusAnimationStyle = nil
+            statusAnimationStep = 0
             return
         }
-        guard runningPulseTimer == nil else { return }
-        runningPulseTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+        let style = store.statusBarStyle
+        guard statusAnimationTimer == nil || statusAnimationStyle != style else { return }
+        statusAnimationTimer?.invalidate()
+        statusAnimationStyle = style
+        statusAnimationStep = 0
+        // 不同图形节奏不同；切换样式时重建定时器，避免动画相位残留。
+        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: style.animationInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.runningPulseDimmed.toggle()
+                self.statusAnimationStep += 1
                 self.renderStatusItem()
             }
         }
@@ -163,24 +174,183 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func makeStatusImage() -> NSImage {
-        let size = NSSize(width: 10, height: 10)
+        let size = store.statusBarStyle.canvasSize
         let image = NSImage(size: size)
         image.lockFocus()
-        statusColor().setFill()
-        NSBezierPath(ovalIn: NSRect(origin: .zero, size: size)).fill()
+        switch store.statusBarStyle {
+        case .defaultDot:
+            drawDefaultDot(in: NSRect(origin: .zero, size: size))
+        case .nineGrid:
+            drawNineGrid(in: NSRect(origin: .zero, size: size))
+        case .signalBars:
+            drawSignalBars(in: NSRect(origin: .zero, size: size))
+        case .orbitRing:
+            drawOrbitRing(in: NSRect(origin: .zero, size: size))
+        case .tripleDots:
+            drawTripleDots(in: NSRect(origin: .zero, size: size))
+        }
         image.unlockFocus()
         image.isTemplate = false
         return image
     }
 
-    private func statusColor() -> NSColor {
+    private func statusColor(alpha: CGFloat = 1.0) -> NSColor {
         switch store.aggregateStatus {
         case .running:
-            return NSColor.systemGreen.withAlphaComponent(runningPulseDimmed ? 0.35 : 1.0)
+            return NSColor.systemGreen.withAlphaComponent(alpha)
         case .error:
-            return .systemRed
+            return NSColor.systemRed.withAlphaComponent(alpha)
         case .idle, .waiting, .completed:
-            return NSColor(white: 0.5, alpha: 0.35)
+            return NSColor(white: 0.5, alpha: 0.35 * alpha)
+        }
+    }
+
+    private func drawDefaultDot(in rect: NSRect) {
+        let alpha: CGFloat
+        switch store.aggregateStatus {
+        case .running:
+            alpha = statusAnimationStep.isMultiple(of: 2) ? 1.0 : 0.35
+        case .error:
+            alpha = 1.0
+        case .idle, .waiting, .completed:
+            alpha = 1.0
+        }
+        statusColor(alpha: alpha).setFill()
+        NSBezierPath(ovalIn: rect).fill()
+    }
+
+    private func drawNineGrid(in rect: NSRect) {
+        let cell: CGFloat = 3
+        let gap: CGFloat = 1.5
+        let activeIndex = statusAnimationStep % 9
+
+        for index in 0..<9 {
+            let row = index / 3
+            let column = index % 3
+            let x = CGFloat(column) * (cell + gap)
+            let y = rect.height - cell - CGFloat(row) * (cell + gap)
+            let alpha: CGFloat
+
+            switch store.aggregateStatus {
+            case .running:
+                // 九宫格按左上到右下顺序轮转，和用户看到的“0 到 8”保持一致。
+                alpha = index == activeIndex ? 1.0 : 0.18
+            case .error:
+                alpha = 1.0
+            case .idle, .waiting, .completed:
+                alpha = 1.0
+            }
+
+            statusColor(alpha: alpha).setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: x, y: y, width: cell, height: cell),
+                xRadius: 0.8,
+                yRadius: 0.8
+            ).fill()
+        }
+    }
+
+    private func drawSignalBars(in rect: NSRect) {
+        let barWidth: CGFloat = 2
+        let gap: CGFloat = 4.0 / 3.0
+        let corner: CGFloat = 1
+        let heights: [CGFloat]
+
+        switch store.aggregateStatus {
+        case .running:
+            let frames: [[CGFloat]] = [
+                [4, 7, 10, 7],
+                [6, 10, 7, 4],
+                [10, 7, 4, 6],
+                [7, 4, 6, 10]
+            ]
+            heights = frames[statusAnimationStep % frames.count]
+        case .error:
+            heights = [10, 10, 10, 10]
+        case .idle, .waiting, .completed:
+            heights = [4, 6, 8, 10]
+        }
+
+        for index in 0..<heights.count {
+            let x = rect.minX + CGFloat(index) * (barWidth + gap)
+            let height = heights[index]
+            statusColor(alpha: 1.0).setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: x, y: rect.minY, width: barWidth, height: height),
+                xRadius: corner,
+                yRadius: corner
+            ).fill()
+        }
+    }
+
+    private func drawOrbitRing(in rect: NSRect) {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let orbitRadius: CGFloat = 4
+        let dotSize: CGFloat = 2.4
+        let activeIndex = statusAnimationStep % 8
+
+        for index in 0..<8 {
+            let angle = (CGFloat.pi * 2 / 8) * CGFloat(index) - .pi / 2
+            let point = CGPoint(
+                x: center.x + cos(angle) * orbitRadius,
+                y: center.y + sin(angle) * orbitRadius
+            )
+            let alpha: CGFloat
+
+            switch store.aggregateStatus {
+            case .running:
+                if index == activeIndex {
+                    alpha = 1.0
+                } else if index == (activeIndex + 7) % 8 {
+                    alpha = 0.45
+                } else {
+                    alpha = 0.18
+                }
+            case .error:
+                alpha = 1.0
+            case .idle, .waiting, .completed:
+                alpha = 1.0
+            }
+
+            statusColor(alpha: alpha).setFill()
+            NSBezierPath(
+                ovalIn: NSRect(
+                    x: point.x - dotSize / 2,
+                    y: point.y - dotSize / 2,
+                    width: dotSize,
+                    height: dotSize
+                )
+            ).fill()
+        }
+    }
+
+    private func drawTripleDots(in rect: NSRect) {
+        let dotSize: CGFloat = 3.2
+        let gap: CGFloat = 2.2
+        let activeIndex = statusAnimationStep % 3
+
+        for index in 0..<3 {
+            let x = CGFloat(index) * (dotSize + gap)
+            let alpha: CGFloat
+
+            switch store.aggregateStatus {
+            case .running:
+                alpha = index == activeIndex ? 1.0 : 0.22
+            case .error:
+                alpha = 1.0
+            case .idle, .waiting, .completed:
+                alpha = 1.0
+            }
+
+            statusColor(alpha: alpha).setFill()
+            NSBezierPath(
+                ovalIn: NSRect(
+                    x: x,
+                    y: (rect.height - dotSize) / 2,
+                    width: dotSize,
+                    height: dotSize
+                )
+            ).fill()
         }
     }
 
@@ -262,6 +432,34 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             UNUserNotificationCenter.current().add(request) { error in
                 continuation.resume(returning: error == nil)
             }
+        }
+    }
+}
+
+private extension StatusBarStyle {
+    var canvasSize: NSSize {
+        switch self {
+        case .defaultDot:
+            return NSSize(width: 10, height: 10)
+        case .nineGrid, .signalBars, .orbitRing:
+            return NSSize(width: 12, height: 12)
+        case .tripleDots:
+            return NSSize(width: 14, height: 10)
+        }
+    }
+
+    var animationInterval: TimeInterval {
+        switch self {
+        case .defaultDot:
+            return 0.7
+        case .nineGrid:
+            return 0.18
+        case .signalBars:
+            return 0.22
+        case .orbitRing:
+            return 0.14
+        case .tripleDots:
+            return 0.24
         }
     }
 }

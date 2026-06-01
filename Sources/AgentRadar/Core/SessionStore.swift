@@ -23,6 +23,7 @@ final class SessionStore: ObservableObject {
     private enum DefaultsKey {
         static let soundEnabled = "soundEnabled"
         static let reminderStyle = "reminderStyle"
+        static let statusBarStyle = "statusBarStyle"
     }
 
     @Published private(set) var sessions: [String: Session] = [:]
@@ -33,6 +34,10 @@ final class SessionStore: ObservableObject {
     @Published var reminderStyle: ReminderStyle = {
         let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
         return ReminderStyle(rawValue: rawValue ?? "") ?? .statusBarBubble
+    }()
+    @Published var statusBarStyle: StatusBarStyle = {
+        let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.statusBarStyle)
+        return StatusBarStyle(rawValue: rawValue ?? "") ?? .defaultDot
     }()
 
     var sortedSessions: [Session] {
@@ -229,6 +234,11 @@ final class SessionStore: ObservableObject {
     func setReminderStyle(_ style: ReminderStyle) {
         reminderStyle = style
         UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.reminderStyle)
+    }
+
+    func setStatusBarStyle(_ style: StatusBarStyle) {
+        statusBarStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.statusBarStyle)
     }
 
     func requestSystemNotificationAuthorization() async -> Bool {
