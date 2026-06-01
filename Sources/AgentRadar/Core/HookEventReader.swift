@@ -85,7 +85,14 @@ final class HookEventReader {
             }
         case "Notification", "PermissionRequest":
             applyStatus(.waiting, event: event, runtime: runtime, eventTime: eventTime)
-        case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse":
+        case "SessionStart":
+            if runtime == .codex {
+                // Codex 的 SessionStart 只是会话进程启动，不代表用户已提交任务；
+                // 这里若直接切 running，就会出现“凭空多出一个运行中任务”。
+                break
+            }
+            applyStatus(.running, event: event, runtime: runtime, eventTime: eventTime)
+        case "UserPromptSubmit", "PreToolUse", "PostToolUse":
             applyStatus(.running, event: event, runtime: runtime, eventTime: eventTime)
         default:
             break

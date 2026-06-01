@@ -100,8 +100,6 @@ final class SessionMonitor {
         let lines = readResult.lines
         let newOffset = readResult.newOffset
         session.fileOffset = newOffset
-        var codexPromptSubmittedAt: Date?
-
         guard !lines.isEmpty else {
             refreshDerivedStatus(&session, runtime: runtime)
             if existing == nil { store.upsert(session) }
@@ -122,10 +120,6 @@ final class SessionMonitor {
             if let tool = summary.toolName { session.currentTool = tool }
             if let txt = summary.userText, !txt.isEmpty {
                 session.taskTitle = String(txt.prefix(120))
-                if runtime == .codex, !fullScan, summary.role == "user" {
-                    // Codex 在真正开跑前，JSONL 会先落一条 user_message；用它把状态提前切到运行中。
-                    codexPromptSubmittedAt = summary.timestamp
-                }
             }
             if let txt = summary.assistantText, !txt.isEmpty {
                 session.lastAssistantText = String(txt.prefix(200))
@@ -136,9 +130,6 @@ final class SessionMonitor {
         refreshDerivedStatus(&session, runtime: runtime)
 
         store.upsert(session)
-        if runtime == .codex, let codexPromptSubmittedAt, session.status != .running {
-            store.setStatus(id: sessionId, status: .running, eventTime: codexPromptSubmittedAt)
-        }
     }
 
     private func rawSessionId(for url: URL, runtime: RuntimeKind) -> String {

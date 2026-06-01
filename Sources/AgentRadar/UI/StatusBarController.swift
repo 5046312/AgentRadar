@@ -7,7 +7,6 @@ import UserNotifications
 final class StatusBarController: NSObject, NSPopoverDelegate {
     private let store: SessionStore
     private let statusItem: NSStatusItem
-    private let trafficLight: TrafficLightView
     private let popover: NSPopover
     private let completionPopover: NSPopover
     private var eventMonitor: Any?
@@ -16,11 +15,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var completionCloseTimer: Timer?
+    private var runningPulseTimer: Timer?
+    private var runningPulseDimmed = false
 
     init(store: SessionStore) {
         self.store = store
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        self.trafficLight = TrafficLightView(frame: NSRect(x: 0, y: 0, width: 56, height: 22))
         self.popover = NSPopover()
         self.completionPopover = NSPopover()
         super.init()
@@ -34,11 +34,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         completionPopover.animates = true
 
         if let button = statusItem.button {
-            button.frame = NSRect(x: 0, y: 0, width: 56, height: 22)
-            button.addSubview(trafficLight)
-            trafficLight.frame = button.bounds
-            trafficLight.autoresizingMask = [.width, .height]
-            trafficLight.statusItem = statusItem
+            // 多屏菜单栏镜像不会稳定复制自定义 subview，改用系统 button 的 image/title 渲染更稳。
+            button.imagePosition = .imageLeading
+            button.imageScaling = .scaleNone
+            button.font = .systemFont(ofSize: 12, weight: .bold)
             button.target = self
             button.action = #selector(togglePopover(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -122,7 +121,67 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func refresh() {
-        trafficLight.update(status: store.aggregateStatus, activeCount: store.activeCount)
+        updateRunningPulse()
+        renderStatusItem()
+    }
+
+    private func updateRunningPulse() {
+        guard store.aggregateStatus == .running else {
+            runningPulseTimer?.invalidate()
+            runningPulseTimer = nil
+            runningPulseDimmed = false
+            return
+        }
+        guard runningPulseTimer == nil else { return }
+        runningPulseTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningPulseDimmed.toggle()
+                self.renderStatusItem()
+            }
+        }
+    }
+
+    private func renderStatusItem() {
+        guard let button = statusItem.button else { return }
+        statusItem.length = NSStatusItem.variableLength
+        button.image = makeStatusImage()
+        button.attributedTitle = makeBadgeTitle(activeCount: store.activeCount)
+    }
+
+    private func makeBadgeTitle(activeCount: Int) -> NSAttributedString {
+        guard activeCount > 0 else {
+            return NSAttributedString(string: "")
+        }
+        return NSAttributedString(
+            string: "\(activeCount)",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: NSColor.labelColor
+            ]
+        )
+    }
+
+    private func makeStatusImage() -> NSImage {
+        let size = NSSize(width: 10, height: 10)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        statusColor().setFill()
+        NSBezierPath(ovalIn: NSRect(origin: .zero, size: size)).fill()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+    private func statusColor() -> NSColor {
+        switch store.aggregateStatus {
+        case .running:
+            return NSColor.systemGreen.withAlphaComponent(runningPulseDimmed ? 0.35 : 1.0)
+        case .error:
+            return .systemRed
+        case .idle, .waiting, .completed:
+            return NSColor(white: 0.5, alpha: 0.35)
+        }
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
@@ -164,10 +223,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         completionCloseTimer?.invalidate()
         completionPopover.performClose(nil)
         // 用独立 popover 模拟状态栏 tooltip，避免打断主列表弹窗的内容状态。
-        completionPopover.contentSize = NSSize(width: 360, height: 106)
+        completionPopover.contentSize = NSSize(width: 320, height: 90)
         completionPopover.contentViewController = NSHostingController(rootView: CompletionNoticeView(notice: notice))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+        completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.completionPopover.performClose(nil) }
         }
     }
@@ -176,7 +235,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
         completionCloseTimer?.invalidate()
         completionPopover.performClose(nil)
-        completionPopover.contentSize = NSSize(width: 360, height: 86)
+        completionPopover.contentSize = NSSize(width: 320, height: 72)
         completionPopover.contentViewController = NSHostingController(rootView: FailureNoticeView(notice: notice))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
@@ -211,12 +270,12 @@ struct CompletionNoticeView: View {
     let notice: CompletionNotice
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: notice.runtime.iconName)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.green)
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 5) {
+                .frame(width: 18, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(notice.titleText)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
@@ -233,8 +292,9 @@ struct CompletionNoticeView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .frame(width: 360, height: 106)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(width: 320, height: 90)
     }
 }
 
@@ -242,12 +302,12 @@ struct FailureNoticeView: View {
     let notice: FailureNotice
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: notice.runtime.iconName)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.red)
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 5) {
+                .frame(width: 18, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(notice.titleText)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
@@ -258,7 +318,8 @@ struct FailureNoticeView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .frame(width: 360, height: 86)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(width: 320, height: 72)
     }
 }

@@ -511,46 +511,23 @@ private struct HookDiffLineView: View {
 struct ProjectSection: View {
     let group: ProjectGroup
 
-    @State private var expanded: Bool
-
-    init(group: ProjectGroup) {
-        self.group = group
-        // 默认只展开有运行中会话的项目
-        _expanded = State(initialValue: group.sessions.contains { $0.status == .running })
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }) {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color(nsColor: group.aggregateStatus.color))
-                        .frame(width: 8, height: 8)
-                    Text(group.name)
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("\(group.sessions.count)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color(nsColor: group.aggregateStatus.color))
+                    .frame(width: 8, height: 8)
+                Text(group.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(group.aggregateStatus.label)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
             }
-            .buttonStyle(.plain)
-
-            if expanded {
-                ForEach(group.sessions, id: \.id) { s in
-                    SessionRow(session: s)
-                    Divider().opacity(0.3).padding(.leading, 30)
-                }
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
 
             Divider().opacity(0.6)
         }
