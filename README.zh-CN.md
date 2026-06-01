@@ -22,7 +22,6 @@ AgentRadar 是一个 macOS 菜单栏工具，用红绿灯状态监控多个 Clau
 - macOS 14 或更新版本。
 - Swift 5.9 或更新版本。
 - Claude Code / Codex。
-- 可选：`jq`，仅 `install-hooks.sh` 需要。
 
 ## 构建
 
@@ -37,12 +36,13 @@ open ./AgentRadar.app
 
 Codex 状态依赖 hooks；Claude 的等待、完成等状态也通过 hooks 更可靠：
 
+先打开 AgentRadar，点弹窗顶部齿轮按钮里的“安装 Hooks”；也可以继续用命令行：
+
 ```bash
-brew install jq
 ./install-hooks.sh
 ```
 
-脚本会备份并更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
+安装逻辑由 AgentRadar 原生执行，不依赖 `jq`。它会备份并更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。Codex hooks 会注入 `SessionStart`、`PermissionRequest`、`PreToolUse`、`PostToolUse`、`Stop`；事件追加到 `~/.agentradar/events.jsonl`。
 
 ## 打包 DMG
 

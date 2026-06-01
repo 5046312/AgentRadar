@@ -3,8 +3,10 @@ import AppKit
 
 struct PopoverContent: View {
     @ObservedObject var store: SessionStore
+    @StateObject private var hookSetup = HookSetupStore()
     @State private var selectedRuntime: RuntimeKind = .claude
     @State private var showingHelp = false
+    @State private var showingSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,6 +36,16 @@ struct PopoverContent: View {
             HStack(spacing: 8) {
                 Text("AgentRadar")
                     .font(.system(size: 13, weight: .semibold))
+                Button(action: { showingSettings = true }) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("设置")
+                .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
+                    HookSettingsView(store: hookSetup)
+                }
                 Button(action: { showingHelp = true }) {
                     Image(systemName: "questionmark.circle")
                         .font(.system(size: 12, weight: .semibold))
@@ -166,7 +178,7 @@ private struct HookHelpView: View {
             Text("使用说明")
                 .font(.system(size: 13, weight: .semibold))
 
-            helpRow("安装 hooks", "在项目目录执行 ./install-hooks.sh，会同时配置 Claude 和 Codex。")
+            helpRow("安装 hooks", "点齿轮按钮可直接安装；也可以在项目目录执行 ./install-hooks.sh。")
             helpRow("Codex 状态", "Codex 的运行、等待输入、完成状态来自 hooks，不再靠 session 文件增长猜测。")
             helpRow("首次信任", "Codex 下次启动可能要求 Review hooks，选择信任后状态才会写入。")
             helpRow("事件文件", "所有事件写入 ~/.agentradar/events.jsonl，AgentRadar 只读本机文件。")
@@ -183,6 +195,71 @@ private struct HookHelpView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct HookSettingsView: View {
+    @ObservedObject var store: HookSetupStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("设置")
+                .font(.system(size: 13, weight: .semibold))
+
+            statusRow("Claude hooks", store.state.claudeInstalled)
+            statusRow("Codex features.hooks", store.state.codexFeatureEnabled)
+            statusRow("Codex hooks.json", store.state.codexHooksInstalled)
+            statusRow("事件文件", store.state.eventsFileExists)
+
+            if let message = store.lastMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let errorMessage = store.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 10) {
+                Button(store.state.allInstalled ? "重装 Hooks" : "安装 Hooks") {
+                    store.installHooks()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isApplying)
+
+                Button("重新检查") {
+                    store.refresh()
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isApplying)
+            }
+
+            Text("原生写入配置，不依赖 jq。若移动了 AgentRadar.app，重装一次 hooks 即可。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+    }
+
+    private func statusRow(_ title: String, _ ok: Bool) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(ok ? Color.green : Color.orange)
+                .frame(width: 8, height: 8)
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+            Spacer()
+            Text(ok ? "OK" : "未安装")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         }
     }
 }

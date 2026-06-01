@@ -22,7 +22,6 @@ AgentRadar is a native macOS menu bar app for watching multiple Claude Code and 
 - macOS 14 or later.
 - Swift 5.9 or later.
 - Claude Code / Codex.
-- Optional: `jq`, only required by `install-hooks.sh`.
 
 ## Build
 
@@ -37,12 +36,13 @@ open ./AgentRadar.app
 
 Codex status depends on hooks. Hooks also make Claude waiting and completed states more reliable:
 
+Open AgentRadar and use the gear button in the popover to install hooks, or keep using the CLI wrapper:
+
 ```bash
-brew install jq
 ./install-hooks.sh
 ```
 
-The script backs up and updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
+The install path is handled natively by AgentRadar and does not require `jq`. It backs up and updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`. Codex hooks include `SessionStart`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop`. Events are appended to `~/.agentradar/events.jsonl`.
 
 ## Package DMG
 
