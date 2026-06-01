@@ -29,6 +29,10 @@ enum PathUtils {
         return home.appendingPathComponent(".codex/sessions", isDirectory: true)
     }
 
+    static var codexMemoriesDir: URL {
+        codexDirectory.appendingPathComponent("memories", isDirectory: true)
+    }
+
     static var hookEventsDirectory: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".agentradar", isDirectory: true)
@@ -52,5 +56,14 @@ enum PathUtils {
 
     static func projectNameFromPath(_ path: String) -> String {
         (path as NSString).lastPathComponent
+    }
+
+    static func isIgnoredProjectPath(_ path: String) -> Bool {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        let ignoredRoots = [codexMemoriesDir.path]
+
+        return ignoredRoots.contains { root in
+            normalizedPath == root || normalizedPath.hasPrefix(root + "/")
+        }
     }
 }

@@ -40,8 +40,13 @@ final class SessionStore: ObservableObject {
         return StatusBarStyle(rawValue: rawValue ?? "") ?? .defaultDot
     }()
 
+    private var trackedSessions: [Session] {
+        // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
+        sessions.values.filter { !PathUtils.isIgnoredProjectPath($0.projectPath) }
+    }
+
     var sortedSessions: [Session] {
-        sessions.values.sorted { lhs, rhs in
+        trackedSessions.sorted { lhs, rhs in
             if lhs.status.priority != rhs.status.priority {
                 return lhs.status.priority < rhs.status.priority
             }
@@ -55,7 +60,7 @@ final class SessionStore: ObservableObject {
 
     func projectGroups(runtime: RuntimeKind?) -> [ProjectGroup] {
         var groups: [String: ProjectGroup] = [:]
-        for s in sessions.values {
+        for s in trackedSessions {
             if let runtime, s.runtime != runtime { continue }
             if groups[s.projectPath] == nil {
                 groups[s.projectPath] = ProjectGroup(id: s.projectPath, name: s.projectName, path: s.projectPath, sessions: [])
@@ -81,15 +86,15 @@ final class SessionStore: ObservableObject {
     }
 
     func count(_ status: SessionStatus, runtime: RuntimeKind) -> Int {
-        sessions.values.filter { $0.runtime == runtime && $0.status == status }.count
+        trackedSessions.filter { $0.runtime == runtime && $0.status == status }.count
     }
 
     func hasSessions(runtime: RuntimeKind) -> Bool {
-        sessions.values.contains { $0.runtime == runtime }
+        trackedSessions.contains { $0.runtime == runtime }
     }
 
     var aggregateStatus: SessionStatus {
-        let statuses = sessions.values.map(\.status)
+        let statuses = trackedSessions.map(\.status)
         if statuses.contains(.error) { return .error }
         if statuses.contains(.waiting) { return .waiting }
         if statuses.contains(.running) { return .running }
@@ -99,10 +104,11 @@ final class SessionStore: ObservableObject {
 
     var activeCount: Int {
         // 状态栏按钮只展示真正执行中的任务数，等待输入不算正在执行。
-        sessions.values.filter { $0.status == .running }.count
+        trackedSessions.filter { $0.status == .running }.count
     }
 
     func upsert(_ session: Session) {
+        guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
         let oldStatus = sessions[session.id]?.status
         sessions[session.id] = session
         version &+= 1
@@ -113,6 +119,7 @@ final class SessionStore: ObservableObject {
 
     func update(id: String, transform: (inout Session) -> Void) {
         guard var s = sessions[id] else { return }
+        guard !PathUtils.isIgnoredProjectPath(s.projectPath) else { return }
         let oldStatus = s.status
         transform(&s)
         sessions[id] = s
@@ -127,6 +134,7 @@ final class SessionStore: ObservableObject {
 
     func setStatus(id: String, status: SessionStatus, eventTime: Date = Date(), flashUntil: Date? = nil) {
         guard var s = sessions[id] else { return }
+        guard !PathUtils.isIgnoredProjectPath(s.projectPath) else { return }
         let oldStatus = s.status
         s.status = status
         s.lastEventTimestamp = eventTime
@@ -153,10 +161,21 @@ final class SessionStore: ObservableObject {
         // hook 事件可能早于 session 文件落盘；先建占位，后续 JSONL 再补齐详情。
         if let rawSessionId, !rawSessionId.isEmpty {
             let id = "\(runtime.rawValue):\(rawSessionId)"
+            if let existing = sessions[id], PathUtils.isIgnoredProjectPath(existing.projectPath) {
+                return
+            }
             if sessions[id] == nil {
+                if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+                   PathUtils.isIgnoredProjectPath(cwd) {
+                    return
+                }
                 sessions[id] = placeholderSession(id: id, runtime: runtime, cwd: cwd, eventTime: eventTime)
             }
             setStatus(id: id, status: status, eventTime: eventTime, flashUntil: flashUntil)
+            return
+        }
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+           PathUtils.isIgnoredProjectPath(cwd) {
             return
         }
         setRuntimeStatus(runtime: runtime, status: status, eventTime: eventTime, cwd: cwd, flashUntil: flashUntil)
@@ -164,7 +183,7 @@ final class SessionStore: ObservableObject {
 
     func setRuntimeStatus(runtime: RuntimeKind, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, flashUntil: Date? = nil) {
         // Codex hook 可能只带 cwd，不带 session_id；用 cwd 缩小范围后取最近活跃会话。
-        let candidates = sessions.values.filter { session in
+        let candidates = trackedSessions.filter { session in
             guard session.runtime == runtime else { return false }
             guard let cwd, !cwd.isEmpty else { return true }
             return session.projectPath == cwd

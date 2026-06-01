@@ -127,6 +127,9 @@ final class SessionMonitor {
             applyTokenSummary(summary, to: &session)
         }
 
+        // Codex 访问内部 memory 仓库时也会写 hook / transcript；这些不是用户项目，直接忽略。
+        guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
+
         refreshDerivedStatus(&session, runtime: runtime)
 
         store.upsert(session)

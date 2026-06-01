@@ -220,8 +220,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func drawNineGrid(in rect: NSRect) {
-        let cell: CGFloat = 3
-        let gap: CGFloat = 1.5
+        let cell: CGFloat = 3.5
+        let gap: CGFloat = 0.75
         let activeIndex = statusAnimationStep % 9
 
         for index in 0..<9 {
@@ -251,8 +251,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func drawSignalBars(in rect: NSRect) {
-        let barWidth: CGFloat = 2
-        let gap: CGFloat = 4.0 / 3.0
+        let barWidth: CGFloat = 2.5
+        let gap: CGFloat = 2.0 / 3.0
         let corner: CGFloat = 1
         let heights: [CGFloat]
 
@@ -285,8 +285,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private func drawOrbitRing(in rect: NSRect) {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let orbitRadius: CGFloat = 4
-        let dotSize: CGFloat = 2.4
+        let orbitRadius: CGFloat = 4.1
+        let dotSize: CGFloat = 2.8
         let activeIndex = statusAnimationStep % 8
 
         for index in 0..<8 {
@@ -325,8 +325,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func drawTripleDots(in rect: NSRect) {
-        let dotSize: CGFloat = 3.2
-        let gap: CGFloat = 2.2
+        let dotSize: CGFloat = 3.8
+        let gap: CGFloat = 1.3
         let activeIndex = statusAnimationStep % 3
 
         for index in 0..<3 {
