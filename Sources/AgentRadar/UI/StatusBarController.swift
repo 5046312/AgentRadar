@@ -21,14 +21,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let store: SessionStore
     private let statusItem: NSStatusItem
     private let popover: NSPopover
+    private let noticePopover: NSPopover
     private let minStatusAnimationTickInterval: TimeInterval = 0.08
     private let minNoticeBubbleWidth: CGFloat = 190
     private let maxNoticeBubbleWidth: CGFloat = 360
     private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
-    private var noticeEventMonitor: Any?
-    private var noticeResignObserver: Any?
     private var versionCancellable: AnyCancellable?
     private var speedCancellable: AnyCancellable?
     private var variationCancellable: AnyCancellable?
@@ -36,7 +35,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var failureCancellable: AnyCancellable?
     private var waitingCancellable: AnyCancellable?
     private var noticeCloseTimer: Timer?
-    private var noticeWindow: NSWindow?
     private var noticePresentationSerial = 0
     private var statusAnimationTimer: Timer?
     private var activeAnimationInterval: TimeInterval?
@@ -67,6 +65,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         self.store = store
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
+        self.noticePopover = NSPopover()
         super.init()
 
         popover.behavior = .applicationDefined
@@ -74,6 +73,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 420)
         popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store))
+
+        noticePopover.behavior = .transient
+        noticePopover.animates = true
+        noticePopover.delegate = self
 
         if let button = statusItem.button {
             // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
@@ -143,9 +146,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         noticePresentationSerial &+= 1
         noticeCloseTimer?.invalidate()
         noticeCloseTimer = nil
-        noticeWindow?.close()
-        noticeWindow = nil
-        removeNoticeCloseHandlers()
+        guard noticePopover.isShown else { return }
+        noticePopover.performClose(nil)
     }
 
     private func installPopoverCloseHandlers() {
@@ -168,25 +170,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func installNoticeCloseHandlers() {
-        removeNoticeCloseHandlers()
-        // 提醒气泡独立成窗口；外部点击或切走应用时主动关闭，避免残留在桌面上。
-        noticeEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            Task { @MainActor in
-                self?.closeNoticeBubble()
-            }
-        }
-        noticeResignObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification,
-            object: NSApp,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.closeNoticeBubble()
-            }
-        }
-    }
-
     private func removePopoverCloseHandlers() {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -198,21 +181,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func removeNoticeCloseHandlers() {
-        if let noticeEventMonitor {
-            NSEvent.removeMonitor(noticeEventMonitor)
-            self.noticeEventMonitor = nil
-        }
-        if let noticeResignObserver {
-            NotificationCenter.default.removeObserver(noticeResignObserver)
-            self.noticeResignObserver = nil
-        }
-    }
-
     func popoverDidClose(_ notification: Notification) {
         guard let closedPopover = notification.object as? NSPopover else { return }
         if closedPopover === popover {
             removePopoverCloseHandlers()
+        } else if closedPopover === noticePopover {
+            noticeCloseTimer?.invalidate()
+            noticeCloseTimer = nil
         }
     }
 
@@ -561,66 +536,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
         DispatchQueue.main.async { [weak self, weak button] in
             guard let self, self.noticePresentationSerial == serial, let button else { return }
-            let panel = self.makeNoticeWindow(contentViewController: contentViewController, size: size)
-            guard self.positionNoticeWindow(panel, relativeTo: button) else { return }
-            self.noticeWindow = panel
-            panel.orderFrontRegardless()
-            self.installNoticeCloseHandlers()
+            self.noticePopover.contentSize = size
+            self.noticePopover.contentViewController = contentViewController
+            // 提醒气泡退回标准 NSPopover，让系统自己处理多屏位置和越界钳制。
+            self.noticePopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             self.noticeCloseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 Task { @MainActor in self?.closeNoticeBubble() }
             }
         }
-    }
-
-    private func makeNoticeWindow(contentViewController: NSViewController, size: NSSize) -> NSPanel {
-        let panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.contentViewController = contentViewController
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        return panel
-    }
-
-    private func positionNoticeWindow(_ window: NSWindow, relativeTo button: NSStatusBarButton) -> Bool {
-        guard
-            let buttonWindow = button.window,
-            let screenFrame = statusButtonScreenFrame(button)
-        else {
-            return false
-        }
-
-        let size = window.frame.size
-        let visibleFrame = buttonWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? screenFrame
-        let margin: CGFloat = 8
-        let minX = visibleFrame.minX + margin
-        let maxX = max(minX, visibleFrame.maxX - size.width - margin)
-        let x = min(max(screenFrame.midX - size.width / 2, minX), maxX)
-        let minY = visibleFrame.minY + margin
-        let maxY = max(minY, visibleFrame.maxY - size.height - margin)
-        let preferredBelowY = screenFrame.minY - size.height - 6
-        let preferredAboveY = screenFrame.maxY + 6
-        let preferredY = preferredBelowY >= minY ? preferredBelowY : preferredAboveY
-        let y = min(max(preferredY, minY), maxY)
-
-        // 提醒来自异步 hook，不能再依赖 NSPopover 动态锚点；这里固定到当前按钮屏幕坐标。
-        // 菜单栏按钮坐标可能落在 visibleFrame 之外，最终位置必须同时做上下边界钳制。
-        window.setFrameOrigin(NSPoint(x: x, y: y))
-        return true
-    }
-
-    private func statusButtonScreenFrame(_ button: NSStatusBarButton) -> NSRect? {
-        guard let buttonWindow = button.window else { return nil }
-        let buttonFrame = button.convert(button.bounds, to: nil)
-        return buttonWindow.convertToScreen(buttonFrame)
     }
 
     private func noticeBubbleWidth(title: String, lines: [String]) -> CGFloat {

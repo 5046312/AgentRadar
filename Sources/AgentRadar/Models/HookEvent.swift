@@ -9,4 +9,5 @@ struct HookEvent: Decodable {
     let cwd: String?
     let turn_id: String?
     let transcript_path: String?
+    let approvals_reviewer: String?
 }

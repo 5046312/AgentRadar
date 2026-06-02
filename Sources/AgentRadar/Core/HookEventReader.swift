@@ -97,7 +97,13 @@ final class HookEventReader {
             } else {
                 applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
             }
-        case "Notification", "PermissionRequest":
+        case "Notification":
+            applyStatus(.waiting, event: event, runtime: runtime, eventTime: eventTime)
+        case "PermissionRequest":
+            if shouldKeepCodexRunningForAutoReview(event, runtime: runtime) {
+                applyStatus(.running, event: event, runtime: runtime, eventTime: eventTime)
+                break
+            }
             applyStatus(.waiting, event: event, runtime: runtime, eventTime: eventTime)
         case "SessionStart":
             if runtime == .codex {
@@ -125,6 +131,27 @@ final class HookEventReader {
 
         // 真实 Codex 会话会带 transcript_path；没有 transcript 的通常是 suggestions/exclude/memory 之类后台任务。
         return (event.transcript_path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
+    private func shouldKeepCodexRunningForAutoReview(_ event: HookEvent, runtime: RuntimeKind) -> Bool {
+        guard runtime == .codex else {
+            return false
+        }
+
+        if event.approvals_reviewer?.trimmingCharacters(in: .whitespacesAndNewlines) == "auto_review" {
+            return true
+        }
+
+        guard
+            let transcriptPath = event.transcript_path?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !transcriptPath.isEmpty
+        else {
+            return false
+        }
+
+        // Codex 自动审查会自己处理权限请求；继续显示“需要用户确认”会误导用户。
+        let transcriptURL = URL(fileURLWithPath: transcriptPath)
+        return JSONLReader.codexApprovalsReviewerIsAutoReview(at: transcriptURL)
     }
 
     private func applyCodexStop(_ event: HookEvent, runtime: RuntimeKind, eventTime: Date) {

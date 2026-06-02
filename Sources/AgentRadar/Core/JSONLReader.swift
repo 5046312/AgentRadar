@@ -182,6 +182,16 @@ enum JSONLReader {
         return .pending
     }
 
+    static func codexApprovalsReviewerIsAutoReview(at url: URL) -> Bool {
+        let lines = readInitialLines(from: url, maxBytes: 1024 * 1024)
+        for line in lines {
+            if codexApprovalsReviewerIsAutoReview(in: line) {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func completeLines(in data: Data) -> (lines: [Data], lastNewline: Int) {
         var lines: [Data] = []
         var lastNewline = -1
@@ -196,6 +206,38 @@ enum JSONLReader {
             }
         }
         return (lines, lastNewline)
+    }
+
+    private static func codexApprovalsReviewerIsAutoReview(in data: Data) -> Bool {
+        guard
+            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            let type = obj["type"] as? String,
+            let payload = obj["payload"] as? [String: Any]
+        else {
+            return false
+        }
+
+        if type == "turn_context" {
+            return stringValue(payload["approvals_reviewer"]) == "auto_review"
+        }
+
+        guard
+            type == "response_item",
+            payload["role"] as? String == "developer",
+            let content = payload["content"] as? [[String: Any]]
+        else {
+            return false
+        }
+
+        // 当前 Codex 把 auto review 写在 developer 权限说明里，还没有稳定同步到 hook payload。
+        return content.contains { item in
+            guard let text = item["text"] as? String else { return false }
+            return text.contains("approvals_reviewer") && text.contains("auto_review")
+        }
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func parseTimestamp(_ s: String?) -> Date? {
