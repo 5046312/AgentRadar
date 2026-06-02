@@ -10,6 +10,7 @@ final class SessionMonitor {
     private let initialScanTailBytes: UInt64 = 64 * 1024
     private let eventScanDirectoryLimit = 40
     private let eventScanFileLimit = 20
+    private let maxRestoredCodexRunningAge: TimeInterval = 30 * 60
 
     init(store: SessionStore) {
         self.store = store
@@ -43,7 +44,7 @@ final class SessionMonitor {
         case .claude:
             scanClaudeInitial()
         case .codex:
-            break
+            scanCodexInitial()
         }
     }
 
@@ -78,15 +79,51 @@ final class SessionMonitor {
         }
     }
 
-    private func ingestFile(_ url: URL, runtime: RuntimeKind) {
+    private func scanCodexInitial() {
+        let dir = PathUtils.sessionsDir(for: .codex)
+        // App 重启后 hook 事件不会重放；从最近 transcript 恢复旧会话行，避免 Codex 菜单空白。
+        let recentFiles = codexJSONLCandidates(under: dir)
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .prefix(initialScanFileLimit)
+
+        for candidate in recentFiles {
+            ingestFile(candidate.url, runtime: .codex, allowCodexCreate: true)
+        }
+    }
+
+    private func codexJSONLCandidates(under dir: URL) -> [(url: URL, modifiedAt: Date)] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var candidates: [(url: URL, modifiedAt: Date)] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "jsonl" else { continue }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            candidates.append((url, values?.contentModificationDate ?? .distantPast))
+        }
+        return candidates
+    }
+
+    private func ingestFile(_ url: URL, runtime: RuntimeKind, allowCodexCreate: Bool = false) {
         let rawSessionId = rawSessionId(for: url, runtime: runtime)
         let sessionId = "\(runtime.rawValue):\(rawSessionId)"
-        let projectPath = initialProjectPath(for: url, runtime: runtime)
+        var projectPath = initialProjectPath(for: url, runtime: runtime)
+        if runtime == .codex, allowCodexCreate {
+            guard let restoredProjectPath = codexInitialProjectPath(for: url) else {
+                return
+            }
+            projectPath = restoredProjectPath
+        }
         let projectName = PathUtils.projectNameFromPath(projectPath)
 
         let existing = store.sessions[sessionId]
-        if runtime == .codex, existing == nil {
-            // Codex 状态只信 hook；没有 hook 占位的 JSONL 文件变化不能创建项目。
+        if runtime == .codex, existing == nil, !allowCodexCreate {
+            // 运行期仍只信 hook 占位；启动恢复允许最近 transcript 创建旧会话行。
             return
         }
         var session = existing ?? Session(
@@ -105,13 +142,18 @@ final class SessionMonitor {
         )
         session.fileURL = url
 
-        let readResult = readLines(from: url, existing: existing, runtime: runtime)
+        let readResult = readLines(
+            from: url,
+            existing: existing,
+            runtime: runtime,
+            readRecentWhenNew: allowCodexCreate
+        )
         let lines = readResult.lines
         let newOffset = readResult.newOffset
         session.fileOffset = newOffset
         guard !lines.isEmpty else {
             refreshDerivedStatus(&session, runtime: runtime)
-            if existing == nil { store.upsert(session) }
+            if existing == nil { store.upsert(session, notify: !allowCodexCreate) }
             return
         }
 
@@ -133,13 +175,50 @@ final class SessionMonitor {
         // Codex 访问内部 memory 仓库时也会写 hook / transcript；这些不是用户项目，直接忽略。
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
 
+        if allowCodexCreate {
+            normalizeRestoredCodexSession(&session)
+        }
         refreshDerivedStatus(&session, runtime: runtime)
 
-        store.upsert(session)
+        store.upsert(session, notify: !allowCodexCreate)
     }
 
-    private func readLines(from url: URL, existing: Session?, runtime: RuntimeKind) -> (lines: [Data], newOffset: UInt64) {
-        if runtime == .claude, existing == nil {
+    private func codexInitialProjectPath(for url: URL) -> String? {
+        let lines = JSONLReader.readInitialLines(from: url, maxBytes: initialScanTailBytes)
+        for line in lines {
+            guard
+                let cwd = JSONLReader.parseCodexSummary(line)?.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !cwd.isEmpty,
+                cwd != PathUtils.sessionsDir(for: .codex).path,
+                !PathUtils.isIgnoredProjectPath(cwd)
+            else {
+                continue
+            }
+            // Codex transcript 尾部不一定还有 cwd；启动恢复必须从头部 meta 拿真实项目路径。
+            return cwd
+        }
+        return nil
+    }
+
+    private func normalizeRestoredCodexSession(_ session: inout Session) {
+        if session.status == .completed {
+            // 启动恢复只还原列表，不重放历史完成闪态，否则打开菜单会短暂铺满旧完成任务。
+            session.status = .idle
+            session.completedFlashUntil = nil
+            return
+        }
+
+        guard session.status == .running else { return }
+        let age = Date().timeIntervalSince(session.lastEventTimestamp)
+        guard age > maxRestoredCodexRunningAge else { return }
+        // transcript 可能缺最后的 task_complete；旧 running 不能继续按开始时间累计成几十小时。
+        session.status = .idle
+        session.activeStartedAt = nil
+        session.lastDuration = nil
+    }
+
+    private func readLines(from url: URL, existing: Session?, runtime: RuntimeKind, readRecentWhenNew: Bool = false) -> (lines: [Data], newOffset: UInt64) {
+        if existing == nil, runtime == .claude || readRecentWhenNew {
             return JSONLReader.readRecentLines(from: url, maxBytes: initialScanTailBytes)
         }
         let startOffset = existing?.fileOffset ?? 0

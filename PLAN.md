@@ -48,7 +48,7 @@
   - 左侧状态点（彩色）
   - 项目名（来自 cwd 末段）+ git branch 灰字
   - 当前 tool 名（来自最新 message 的 tool_use.name）或最后助手消息前 60 字
-  - 右侧：相对时间（"3s ago"）+ token 数
+  - 右侧：相对时间（"3s ago"）
 - 点击行 → 通过 `NSWorkspace` 打开 cwd 目录
 - 底部：设置按钮、退出按钮
 

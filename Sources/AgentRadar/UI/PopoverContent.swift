@@ -630,25 +630,76 @@ struct ProjectSection: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color(nsColor: group.aggregateStatus.color))
-                    .frame(width: 8, height: 8)
-                Text(group.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Text(group.statusLabel(now: now))
-                    .font(.system(size: 10, weight: .medium))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
+            projectHeader
+
+            if group.shouldShowTaskRows {
+                VStack(spacing: 0) {
+                    ForEach(group.visibleTaskSessions) { session in
+                        SessionTaskRow(
+                            session: session,
+                            taskNumber: taskNumber(for: session),
+                            now: now
+                        )
+                    }
+                }
+                .padding(.bottom, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
 
             Divider().opacity(0.6)
         }
+    }
+
+    private var projectHeader: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(nsColor: group.aggregateStatus.color))
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(group.statusLabel(now: now))
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private func taskNumber(for session: Session) -> Int {
+        (group.visibleTaskSessions.firstIndex { $0.id == session.id } ?? 0) + 1
+    }
+}
+
+private struct SessionTaskRow: View {
+    let session: Session
+    let taskNumber: Int
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color(nsColor: session.status.color))
+                .frame(width: 6, height: 6)
+            Text("任务 \(taskNumber)")
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(session.statusLabel(now: now))
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                .foregroundStyle(Color(nsColor: session.status.color))
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.vertical, 5)
+        // 子行只在同一项目有多个未结束任务时出现，计时必须跟随各自 session。
+        .background(Color.secondary.opacity(0.05))
     }
 }

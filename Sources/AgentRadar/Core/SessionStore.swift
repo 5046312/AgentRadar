@@ -16,7 +16,19 @@ struct ProjectGroup: Identifiable {
         return .idle
     }
 
+    var visibleTaskSessions: [Session] {
+        // 只拆分未结束任务；idle 历史会话继续折叠在项目行，避免菜单被旧 session 刷屏。
+        sessions.filter { $0.status != .idle }
+    }
+
+    var shouldShowTaskRows: Bool {
+        visibleTaskSessions.count > 1
+    }
+
     func statusLabel(now: Date) -> String {
+        if shouldShowTaskRows {
+            return "\(visibleTaskSessions.count) 个任务"
+        }
         guard aggregateStatus == .running else {
             return aggregateStatus.label
         }
@@ -27,27 +39,41 @@ struct ProjectGroup: Identifiable {
     }
 
     private var runningStartedAt: Date? {
-        // 项目行已经不展示子会话；多个 running 会话时，用最早开始时间表示项目已运行时长。
+        // 只有单个未结束任务时才在项目行计时；多个任务会拆到子行各自计时。
         sessions
             .filter { $0.status == .running }
             .compactMap(\.activeStartedAt)
             .min()
     }
 
-    private func elapsedDurationText(from startedAt: Date, to now: Date) -> String {
-        let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
+}
 
-        if hours > 0 {
-            return "\(hours)小时\(minutes)分\(seconds)秒"
+extension Session {
+    func statusLabel(now: Date) -> String {
+        guard status == .running else {
+            return status.label
         }
-        if minutes > 0 {
-            return "\(minutes)分\(seconds)秒"
+        guard let startedAt = activeStartedAt else {
+            // 起始时间缺失时只展示状态，避免用项目聚合时间冒充单个任务耗时。
+            return status.label
         }
-        return "\(seconds)秒"
+        return "运行 \(elapsedDurationText(from: startedAt, to: now))"
     }
+}
+
+private func elapsedDurationText(from startedAt: Date, to now: Date) -> String {
+    let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    let seconds = totalSeconds % 60
+
+    if hours > 0 {
+        return "\(hours)小时\(minutes)分\(seconds)秒"
+    }
+    if minutes > 0 {
+        return "\(minutes)分\(seconds)秒"
+    }
+    return "\(seconds)秒"
 }
 
 @MainActor
@@ -122,7 +148,7 @@ final class SessionStore: ObservableObject {
     }
 
     func hasSessions(runtime: RuntimeKind) -> Bool {
-        trackedSessions.contains { $0.runtime == runtime }
+        return trackedSessions.contains { $0.runtime == runtime }
     }
 
     var aggregateStatus: SessionStatus {
@@ -139,13 +165,13 @@ final class SessionStore: ObservableObject {
         trackedSessions.filter { $0.status == .running }.count
     }
 
-    func upsert(_ session: Session) {
+    func upsert(_ session: Session, notify: Bool = true) {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
         let nextSession = session
         let oldStatus = sessions[nextSession.id]?.status
         sessions[nextSession.id] = nextSession
         version &+= 1
-        if nextSession.status == .completed && oldStatus != .completed {
+        if notify, nextSession.status == .completed && oldStatus != .completed {
             publishCompletion(nextSession)
         }
     }

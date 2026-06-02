@@ -82,6 +82,18 @@ enum JSONLReader {
         return (lines, fileSize)
     }
 
+    static func readInitialLines(from url: URL, maxBytes: UInt64) -> [Data] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return []
+        }
+        defer { try? handle.close() }
+
+        guard let data = try? handle.read(upToCount: Int(maxBytes)), !data.isEmpty else {
+            return []
+        }
+        return completeLines(in: data).lines
+    }
+
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil

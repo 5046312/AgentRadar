@@ -60,7 +60,8 @@ enum PathUtils {
 
     static func isIgnoredProjectPath(_ path: String) -> Bool {
         let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-        let ignoredRoots = [codexMemoriesDir.path]
+        // `.codex/sessions` 是 transcript 存储目录，不是真实项目；缺 cwd 时不能显示成 sessions 项目。
+        let ignoredRoots = [codexMemoriesDir.path, codexSessionsDir.path]
 
         return ignoredRoots.contains { root in
             normalizedPath == root || normalizedPath.hasPrefix(root + "/")
