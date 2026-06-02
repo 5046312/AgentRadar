@@ -5,6 +5,13 @@ struct JSONLEntrySummary {
     let cwd: String?
 }
 
+enum CodexTranscriptStatusEvent {
+    case started
+    case completed
+    case interrupted
+    case failed
+}
+
 enum CodexTurnOutcome {
     case completed
     case interrupted
@@ -92,7 +99,7 @@ enum JSONLReader {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
         }
-        // Codex 状态只信 hook；JSONL 只补项目路径，避免回到文件增长推断。
+        // Codex 仍以 hook 为主；这里先统一补时间和 cwd，状态兜底单独解析 event_msg。
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let type = obj["type"] as? String
         let payload = obj["payload"] as? [String: Any]
@@ -107,6 +114,29 @@ enum JSONLReader {
             timestamp: timestamp,
             cwd: cwd
         )
+    }
+
+    static func parseCodexStatusEvent(_ data: Data) -> CodexTranscriptStatusEvent? {
+        guard
+            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            obj["type"] as? String == "event_msg",
+            let payload = obj["payload"] as? [String: Any],
+            let eventType = payload["type"] as? String
+        else {
+            return nil
+        }
+
+        switch eventType {
+        case "task_started":
+            return .started
+        case "task_complete":
+            return .completed
+        case "turn_aborted":
+            // interrupted 是用户主动 stop / retry；其余中断原因仍按失败处理。
+            return (payload["reason"] as? String) == "interrupted" ? .interrupted : .failed
+        default:
+            return nil
+        }
     }
 
     static func codexTurnOutcome(at url: URL, turnId: String) -> CodexTurnOutcome {

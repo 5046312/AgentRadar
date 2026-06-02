@@ -4,24 +4,48 @@ let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "As
 let pixels = 1024
 let size = CGSize(width: pixels, height: pixels)
 
-func drawRoundedSquare(in rect: CGRect, radius: CGFloat, colors: [NSColor]) {
-    let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-    let gradient = NSGradient(colors: colors)!
-    gradient.draw(in: path, angle: -45)
+func drawRoundedRect(_ rect: CGRect, radius: CGFloat, fill: NSColor) {
+    fill.setFill()
+    NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
 }
 
-func strokeCircle(center: CGPoint, radius: CGFloat, color: NSColor, width: CGFloat) {
-    let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-    let path = NSBezierPath(ovalIn: rect)
+func drawRoundedGradient(_ rect: CGRect, radius: CGFloat, colors: [NSColor], angle: CGFloat) {
+    let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+    NSGradient(colors: colors)?.draw(in: path, angle: angle)
+}
+
+func strokeRoundedRect(_ rect: CGRect, radius: CGFloat, color: NSColor, width: CGFloat) {
     color.setStroke()
+    let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     path.lineWidth = width
     path.stroke()
 }
 
-func fillCircle(center: CGPoint, radius: CGFloat, color: NSColor) {
-    let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-    color.setFill()
-    NSBezierPath(ovalIn: rect).fill()
+func drawRunningCell(in rect: CGRect, tone: Int) {
+    let colors: [NSColor]
+    switch tone {
+    case 0:
+        colors = [
+            NSColor(calibratedRed: 0.78, green: 1.0, blue: 0.78, alpha: 1),
+            NSColor(calibratedRed: 0.42, green: 0.92, blue: 0.48, alpha: 1),
+            NSColor(calibratedRed: 0.10, green: 0.62, blue: 0.22, alpha: 1)
+        ]
+    case 2:
+        colors = [
+            NSColor(calibratedRed: 0.38, green: 0.82, blue: 0.42, alpha: 1),
+            NSColor(calibratedRed: 0.08, green: 0.54, blue: 0.20, alpha: 1),
+            NSColor(calibratedRed: 0.01, green: 0.28, blue: 0.10, alpha: 1)
+        ]
+    default:
+        colors = [
+            NSColor(calibratedRed: 0.62, green: 1.0, blue: 0.70, alpha: 1),
+            NSColor.systemGreen,
+            NSColor(calibratedRed: 0.04, green: 0.45, blue: 0.18, alpha: 1)
+        ]
+    }
+
+    drawRoundedRect(rect.insetBy(dx: -12, dy: -12), radius: 34, fill: NSColor.systemGreen.withAlphaComponent(0.10))
+    drawRoundedGradient(rect, radius: 30, colors: colors, angle: -45)
 }
 
 guard let bitmap = NSBitmapImageRep(
@@ -40,77 +64,62 @@ guard let bitmap = NSBitmapImageRep(
     fatalError("failed to create icon bitmap")
 }
 
-// App icon 所有尺寸都从 1024 画布缩放，避免不同尺寸出现构图偏移。
+// App icon 所有尺寸都从 1024 画布缩放，确保小尺寸下九宫格仍然清晰。
 bitmap.size = size
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = graphics
 
-let rect = CGRect(origin: .zero, size: size)
-drawRoundedSquare(
-    in: rect.insetBy(dx: 64, dy: 64),
+let canvas = CGRect(origin: .zero, size: size)
+drawRoundedGradient(
+    canvas.insetBy(dx: 64, dy: 64),
     radius: 212,
     colors: [
-        NSColor(calibratedRed: 0.03, green: 0.08, blue: 0.12, alpha: 1),
-        NSColor(calibratedRed: 0.02, green: 0.22, blue: 0.24, alpha: 1),
-        NSColor(calibratedRed: 0.04, green: 0.09, blue: 0.16, alpha: 1)
-    ]
+        NSColor(calibratedRed: 0.02, green: 0.06, blue: 0.08, alpha: 1),
+        NSColor(calibratedRed: 0.02, green: 0.16, blue: 0.13, alpha: 1),
+        NSColor(calibratedRed: 0.01, green: 0.09, blue: 0.13, alpha: 1)
+    ],
+    angle: -35
 )
 
-let center = CGPoint(x: 512, y: 528)
-let radarGreen = NSColor(calibratedRed: 0.18, green: 0.92, blue: 0.63, alpha: 1)
-let mutedGreen = NSColor(calibratedRed: 0.24, green: 0.72, blue: 0.66, alpha: 0.42)
-let gridWhite = NSColor.white.withAlphaComponent(0.12)
+strokeRoundedRect(
+    canvas.insetBy(dx: 96, dy: 96),
+    radius: 186,
+    color: NSColor.white.withAlphaComponent(0.08),
+    width: 16
+)
 
-for radius in [120, 210, 300] as [CGFloat] {
-    strokeCircle(center: center, radius: radius, color: gridWhite, width: 14)
+let board = CGRect(x: 214, y: 214, width: 596, height: 596)
+drawRoundedRect(board.insetBy(dx: -34, dy: -34), radius: 86, fill: NSColor.black.withAlphaComponent(0.18))
+strokeRoundedRect(board.insetBy(dx: -34, dy: -34), radius: 86, color: NSColor.white.withAlphaComponent(0.08), width: 12)
+
+let gap: CGFloat = 30
+let cell = (board.width - gap * 2) / 3
+let litCells = 7
+let tones = [0, 1, 1, 2, 0, 1, 2]
+let idleCellFill = NSColor(calibratedRed: 0.13, green: 0.22, blue: 0.22, alpha: 1)
+
+for index in 0..<9 {
+    let row = index / 3
+    let column = index % 3
+    let rect = CGRect(
+        x: board.minX + CGFloat(column) * (cell + gap),
+        y: board.maxY - cell - CGFloat(row) * (cell + gap),
+        width: cell,
+        height: cell
+    )
+
+    if index < litCells {
+        drawRunningCell(in: rect, tone: tones[index])
+    } else {
+        // 未运行格用不透明深色，避免边缘透出绿色底色形成浅绿边框。
+        drawRoundedRect(rect, radius: 30, fill: idleCellFill)
+    }
 }
 
-let cross = NSBezierPath()
-cross.move(to: CGPoint(x: center.x, y: center.y - 322))
-cross.line(to: CGPoint(x: center.x, y: center.y + 322))
-cross.move(to: CGPoint(x: center.x - 322, y: center.y))
-cross.line(to: CGPoint(x: center.x + 322, y: center.y))
-gridWhite.setStroke()
-cross.lineWidth = 12
-cross.lineCapStyle = .round
-cross.stroke()
-
-let sweep = NSBezierPath()
-sweep.move(to: center)
-sweep.line(to: CGPoint(x: 754, y: 704))
-sweep.appendArc(withCenter: center, radius: 300, startAngle: 36, endAngle: 78)
-sweep.close()
-NSColor(calibratedRed: 0.19, green: 0.95, blue: 0.69, alpha: 0.28).setFill()
-sweep.fill()
-
-let beam = NSBezierPath()
-beam.move(to: center)
-beam.line(to: CGPoint(x: 760, y: 700))
-radarGreen.withAlphaComponent(0.92).setStroke()
-beam.lineWidth = 24
-beam.lineCapStyle = .round
-beam.stroke()
-
-strokeCircle(center: center, radius: 28, color: radarGreen.withAlphaComponent(0.95), width: 22)
-fillCircle(center: CGPoint(x: 385, y: 706), radius: 34, color: NSColor.systemRed)
-fillCircle(center: CGPoint(x: 628, y: 706), radius: 34, color: NSColor.systemYellow)
-fillCircle(center: CGPoint(x: 536, y: 318), radius: 42, color: radarGreen)
-
-let letter = NSAttributedString(
-    string: "A",
-    attributes: [
-        .font: NSFont.systemFont(ofSize: 300, weight: .black),
-        .foregroundColor: NSColor.white.withAlphaComponent(0.92),
-        .kern: -12
-    ]
-)
-let letterSize = letter.size()
-letter.draw(at: CGPoint(x: center.x - letterSize.width / 2, y: center.y - letterSize.height / 2 - 6))
-
-let shine = NSBezierPath(roundedRect: rect.insetBy(dx: 112, dy: 112), xRadius: 172, yRadius: 172)
+let highlight = NSBezierPath(roundedRect: canvas.insetBy(dx: 110, dy: 110), xRadius: 170, yRadius: 170)
 NSColor.white.withAlphaComponent(0.045).setStroke()
-shine.lineWidth = 16
-shine.stroke()
+highlight.lineWidth = 18
+highlight.stroke()
 
 graphics.flushGraphics()
 NSGraphicsContext.restoreGraphicsState()

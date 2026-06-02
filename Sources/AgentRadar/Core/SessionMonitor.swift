@@ -120,6 +120,9 @@ final class SessionMonitor {
             session.lastActivity = max(session.lastActivity, summary.timestamp)
             if runtime == .claude {
                 session.lastEventTimestamp = summary.timestamp
+            } else if let event = JSONLReader.parseCodexStatusEvent(line) {
+                // Codex interrupted 场景不一定会发 Stop hook；这里用 transcript 增量把状态补齐。
+                applyCodexStatusEvent(event, to: &session, eventTime: summary.timestamp)
             }
             if let cwd = summary.cwd, !cwd.isEmpty {
                 session.projectPath = cwd
@@ -185,7 +188,35 @@ final class SessionMonitor {
             }
             return
         }
-        // Codex 状态由 hooks 写入，session JSONL 只更新展示信息。
+        // Codex 仍以 hooks 为主；这里只保留 transcript 兜底，不再额外做超时推断。
+    }
+
+    private func applyCodexStatusEvent(_ event: CodexTranscriptStatusEvent, to session: inout Session, eventTime: Date) {
+        session.lastEventTimestamp = eventTime
+
+        switch event {
+        case .started:
+            // retry 会先把旧 turn 中断，再立刻写入新 task_started；这里必须重置起始时间。
+            session.status = .running
+            session.activeStartedAt = eventTime
+            session.lastDuration = nil
+            session.completedFlashUntil = nil
+        case .completed:
+            session.status = .completed
+            if let startedAt = session.activeStartedAt {
+                session.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
+            }
+            session.completedFlashUntil = Date().addingTimeInterval(3)
+        case .interrupted:
+            session.status = .idle
+            session.completedFlashUntil = nil
+        case .failed:
+            session.status = .error
+            if let startedAt = session.activeStartedAt {
+                session.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
+            }
+            session.completedFlashUntil = nil
+        }
     }
 
     private func startFSEvents(path: String) {
