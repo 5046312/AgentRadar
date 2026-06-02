@@ -604,12 +604,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let minX = visibleFrame.minX + margin
         let maxX = max(minX, visibleFrame.maxX - size.width - margin)
         let x = min(max(screenFrame.midX - size.width / 2, minX), maxX)
-        let belowY = screenFrame.minY - size.height - 6
         let minY = visibleFrame.minY + margin
         let maxY = max(minY, visibleFrame.maxY - size.height - margin)
-        let y = belowY >= minY ? belowY : min(max(screenFrame.maxY + 6, minY), maxY)
+        let preferredBelowY = screenFrame.minY - size.height - 6
+        let preferredAboveY = screenFrame.maxY + 6
+        let preferredY = preferredBelowY >= minY ? preferredBelowY : preferredAboveY
+        let y = min(max(preferredY, minY), maxY)
 
         // 提醒来自异步 hook，不能再依赖 NSPopover 动态锚点；这里固定到当前按钮屏幕坐标。
+        // 菜单栏按钮坐标可能落在 visibleFrame 之外，最终位置必须同时做上下边界钳制。
         window.setFrameOrigin(NSPoint(x: x, y: y))
         return true
     }

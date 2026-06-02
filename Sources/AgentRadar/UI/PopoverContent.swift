@@ -10,6 +10,7 @@ struct PopoverContent: View {
     @State private var showingSettings = false
     @State private var now = Date()
     @State private var clockTimer: Timer?
+    @State private var clockTimerInterval: TimeInterval?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -178,27 +179,40 @@ struct PopoverContent: View {
     }
 
     private func syncClockTimer() {
-        guard store.count(.running, runtime: selectedRuntime) > 0 else {
+        guard let interval = clockInterval else {
             stopClockTimer()
             return
         }
-        startClockTimer()
+        startClockTimer(interval: interval)
     }
 
-    private func startClockTimer() {
-        guard clockTimer == nil else { return }
+    private var clockInterval: TimeInterval? {
+        if store.count(.running, runtime: selectedRuntime) > 0 {
+            return 1.0
+        }
+        if store.hasCurrentRunCompletion(runtime: selectedRuntime) {
+            return 60.0
+        }
+        return nil
+    }
+
+    private func startClockTimer(interval: TimeInterval) {
+        guard clockTimer == nil || clockTimerInterval != interval else { return }
+        stopClockTimer()
         now = Date()
-        // 运行时长只需要秒级刷新；弹窗关闭或当前 runtime 无运行任务时停掉，避免后台空转。
-        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+        // 运行计时秒级刷新；完成后的相对时间只需分钟级刷新，避免空闲时后台空转。
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in
             now = Date()
         }
         RunLoop.main.add(timer, forMode: .common)
         clockTimer = timer
+        clockTimerInterval = interval
     }
 
     private func stopClockTimer() {
         clockTimer?.invalidate()
         clockTimer = nil
+        clockTimerInterval = nil
     }
 }
 

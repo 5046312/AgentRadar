@@ -138,7 +138,8 @@ final class SessionMonitor {
             fileURL: url,
             fileOffset: 0,
             completedFlashUntil: nil,
-            lastDuration: nil
+            lastDuration: nil,
+            lastCompletedAt: nil
         )
         session.fileURL = url
 
@@ -201,6 +202,8 @@ final class SessionMonitor {
     }
 
     private func normalizeRestoredCodexSession(_ session: inout Session) {
+        // 启动恢复只还原列表；“上次完成”只记录本次 App 打开后触发的完成事件。
+        session.lastCompletedAt = nil
         if session.status == .completed {
             // 启动恢复只还原列表，不重放历史完成闪态，否则打开菜单会短暂铺满旧完成任务。
             session.status = .idle
@@ -261,6 +264,7 @@ final class SessionMonitor {
             // 启动恢复只保留 Claude 近期状态，避免旧会话误亮。
             if now.timeIntervalSince(session.lastEventTimestamp) > 30 {
                 session.status = .idle
+                session.lastCompletedAt = nil
                 if session.completedFlashUntil != nil, now > (session.completedFlashUntil ?? now) {
                     session.completedFlashUntil = nil
                 }
@@ -279,9 +283,11 @@ final class SessionMonitor {
             session.status = .running
             session.activeStartedAt = eventTime
             session.lastDuration = nil
+            session.lastCompletedAt = nil
             session.completedFlashUntil = nil
         case .completed:
             session.status = .completed
+            session.lastCompletedAt = eventTime
             if let startedAt = session.activeStartedAt {
                 session.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
             }

@@ -17,8 +17,8 @@ struct ProjectGroup: Identifiable {
     }
 
     var visibleTaskSessions: [Session] {
-        // 只拆分未结束任务；idle 历史会话继续折叠在项目行，避免菜单被旧 session 刷屏。
-        sessions.filter { $0.status != .idle }
+        // 旧 idle 历史继续折叠；本次打开后完成的任务要保留一行，才能显示“上次完成”。
+        sessions.filter { $0.status != .idle || $0.lastCompletedAt != nil }
     }
 
     var shouldShowTaskRows: Bool {
@@ -30,12 +30,19 @@ struct ProjectGroup: Identifiable {
             return "\(visibleTaskSessions.count) 个任务"
         }
         guard aggregateStatus == .running else {
+            if aggregateStatus == .idle, let completedAt = latestCompletedAt {
+                return idleAfterCompletionLabel(from: completedAt, to: now)
+            }
             return aggregateStatus.label
         }
         guard let startedAt = runningStartedAt else {
             return aggregateStatus.label
         }
         return "运行 \(elapsedDurationText(from: startedAt, to: now))"
+    }
+
+    private var latestCompletedAt: Date? {
+        sessions.compactMap(\.lastCompletedAt).max()
     }
 
     private var runningStartedAt: Date? {
@@ -50,6 +57,9 @@ struct ProjectGroup: Identifiable {
 
 extension Session {
     func statusLabel(now: Date) -> String {
+        if status == .idle, let lastCompletedAt {
+            return idleAfterCompletionLabel(from: lastCompletedAt, to: now)
+        }
         guard status == .running else {
             return status.label
         }
@@ -74,6 +84,26 @@ private func elapsedDurationText(from startedAt: Date, to now: Date) -> String {
         return "\(minutes)分\(seconds)秒"
     }
     return "\(seconds)秒"
+}
+
+private func idleAfterCompletionLabel(from completedAt: Date, to now: Date) -> String {
+    "空闲(上次完成\(relativePastText(from: completedAt, to: now)))"
+}
+
+private func relativePastText(from date: Date, to now: Date) -> String {
+    let totalSeconds = max(0, Int(now.timeIntervalSince(date)))
+    if totalSeconds < 60 {
+        return "刚刚"
+    }
+    let minutes = totalSeconds / 60
+    if minutes < 60 {
+        return "\(minutes)分钟前"
+    }
+    let hours = minutes / 60
+    if hours < 24 {
+        return "\(hours)小时前"
+    }
+    return "\(hours / 24)天前"
 }
 
 @MainActor
@@ -147,6 +177,11 @@ final class SessionStore: ObservableObject {
         trackedSessions.filter { $0.runtime == runtime && $0.status == status }.count
     }
 
+    func hasCurrentRunCompletion(runtime: RuntimeKind) -> Bool {
+        // lastCompletedAt 只在本次 App 运行期间的完成事件里写入；启动恢复不会保留历史完成时间。
+        trackedSessions.contains { $0.runtime == runtime && $0.lastCompletedAt != nil }
+    }
+
     func hasSessions(runtime: RuntimeKind) -> Bool {
         return trackedSessions.contains { $0.runtime == runtime }
     }
@@ -189,9 +224,13 @@ final class SessionStore: ObservableObject {
                 s.activeStartedAt = eventTime
             }
             s.lastDuration = nil
+            s.lastCompletedAt = nil
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
             s.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
+        }
+        if status == .completed, oldStatus != .completed {
+            s.lastCompletedAt = eventTime
         }
         if let f = flashUntil { s.completedFlashUntil = f }
         sessions[id] = s
@@ -269,7 +308,8 @@ final class SessionStore: ObservableObject {
             fileURL: transcriptURL ?? PathUtils.sessionsDir(for: runtime),
             fileOffset: transcriptOffsetBaseline(for: transcriptURL),
             completedFlashUntil: nil,
-            lastDuration: nil
+            lastDuration: nil,
+            lastCompletedAt: nil
         )
     }
 

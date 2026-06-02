@@ -56,6 +56,7 @@ struct Session: Identifiable, Equatable {
     var fileOffset: UInt64
     var completedFlashUntil: Date?
     var lastDuration: TimeInterval?
+    var lastCompletedAt: Date?
 }
 
 struct CompletionNotice: Identifiable, Equatable {
