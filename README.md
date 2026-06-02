@@ -6,23 +6,25 @@ English | [简体中文](README.zh-CN.md)
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar is a native macOS menu bar monitor for Claude Code and Codex project status.
+AgentRadar is a native macOS menu bar app for monitoring Claude Code and Codex project status. It reads local session data, records hook events, and reminds you when a task waits for confirmation, finishes, or fails.
 
-## Features
+## Highlights
 
-- Fixed 3x3 menu bar indicator with active-task badge.
-- Running indicator lights green gradient cells from the configured base speed with subtle breathing timing, then restarts from the first cell after all 9 cells are lit.
-- Popover shows runtime tabs and project-level status.
-- Completion and failure reminders via status bar bubble or system notification.
+- Compact popover with project-level status only.
+- 3x3 menu bar indicator with the active-project count shown on the right.
+- Running animation lights one more grid cell per tick, uses subtle green tone variation, and speeds up by the current number of running projects.
+- Running projects show elapsed time from task start.
+- Completion, failure, and confirmation-waiting reminders via status bar bubble or system notification.
+- Status bar bubbles auto-size to content. Completion reminders include duration.
 - In-app hook installer with diff preview before writing.
-- Native Swift/AppKit/SwiftUI app with no third-party runtime dependencies.
+- Native Swift/AppKit/SwiftUI app. No `jq` or third-party runtime dependency.
 
-## Status Source
+## Status Detection
 
-- Claude reads `~/.claude/projects/**/*.jsonl` and uses hooks for more reliable waiting/completion states.
-- Codex status depends on hooks only. JSONL files fill project and session details.
-- Hook events are appended to `~/.agentradar/events.jsonl`.
-- Internal Codex memory paths and root-level internal tasks are ignored so they do not appear as user projects.
+- Claude reads `~/.claude/projects/**/*.jsonl`; hooks improve running, waiting, and completion transitions.
+- Codex task status is hook-only. JSONL/transcript data only fills project/session details and final turn outcome.
+- Hook records are appended to `~/.agentradar/events.jsonl`. AgentRadar watches file changes and also drains once per second as a fallback.
+- Codex events without `transcript_path`, root `/` tasks, and internal memory paths are ignored so internal background work does not appear as user projects.
 
 ## Requirements
 
@@ -51,6 +53,15 @@ You can also use the CLI wrapper:
 
 The installer is implemented natively and does not require `jq`. It updates `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.codex/hooks.json`.
 
+Claude hooks installed by AgentRadar:
+
+- `Stop`
+- `SubagentStop`
+- `Notification`
+- `PreToolUse`
+- `PostToolUse`
+- `UserPromptSubmit`
+
 Codex hooks installed by AgentRadar:
 
 - `UserPromptSubmit`
@@ -65,7 +76,9 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 - Reminder style: status bar bubble or system notification.
 - Sound: toggle completion sound.
-- Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted in settings.
+- Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted from 0.25 to 2 seconds per cell.
+- Tick speed is multiplied by the number of running projects.
+- Interval variation defaults to +/-50%; enter a number from 0 to 100 only.
 
 ## Package DMG
 

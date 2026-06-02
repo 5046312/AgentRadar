@@ -23,7 +23,7 @@ struct ProjectGroup: Identifiable {
         guard let startedAt = runningStartedAt else {
             return aggregateStatus.label
         }
-        return "运行 \(elapsedSeconds(from: startedAt, to: now)) 秒"
+        return "运行 \(elapsedDurationText(from: startedAt, to: now))"
     }
 
     private var runningStartedAt: Date? {
@@ -34,8 +34,19 @@ struct ProjectGroup: Identifiable {
             .min()
     }
 
-    private func elapsedSeconds(from startedAt: Date, to now: Date) -> Int {
-        max(0, Int(now.timeIntervalSince(startedAt)))
+    private func elapsedDurationText(from startedAt: Date, to now: Date) -> String {
+        let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return "\(hours)小时\(minutes)分\(seconds)秒"
+        }
+        if minutes > 0 {
+            return "\(minutes)分\(seconds)秒"
+        }
+        return "\(seconds)秒"
     }
 }
 
@@ -45,16 +56,21 @@ final class SessionStore: ObservableObject {
         static let soundEnabled = "soundEnabled"
         static let reminderStyle = "reminderStyle"
         static let nineGridAnimationInterval = "nineGridAnimationInterval"
+        static let nineGridIntervalVariationPercent = "nineGridIntervalVariationPercent"
     }
 
     nonisolated static let minNineGridAnimationInterval: Double = 0.25
     nonisolated static let maxNineGridAnimationInterval: Double = 2.0
     nonisolated static let defaultNineGridAnimationInterval: Double = 1.0
+    nonisolated static let minNineGridIntervalVariationPercent: Double = 0
+    nonisolated static let maxNineGridIntervalVariationPercent: Double = 100
+    nonisolated static let defaultNineGridIntervalVariationPercent: Double = 50
 
     @Published private(set) var sessions: [String: Session] = [:]
     @Published private(set) var version: Int = 0
     @Published private(set) var latestCompletion: CompletionNotice?
     @Published private(set) var latestFailure: FailureNotice?
+    @Published private(set) var latestWaiting: WaitingNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
     @Published var reminderStyle: ReminderStyle = {
         let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
@@ -63,6 +79,10 @@ final class SessionStore: ObservableObject {
     @Published var nineGridAnimationInterval: Double = SessionStore.clampedNineGridAnimationInterval(SessionStore.loadDouble(
         forKey: DefaultsKey.nineGridAnimationInterval,
         fallback: SessionStore.defaultNineGridAnimationInterval
+    ))
+    @Published var nineGridIntervalVariationPercent: Double = SessionStore.clampedNineGridIntervalVariationPercent(SessionStore.loadDouble(
+        forKey: DefaultsKey.nineGridIntervalVariationPercent,
+        fallback: SessionStore.defaultNineGridIntervalVariationPercent
     ))
 
     private var trackedSessions: [Session] {
@@ -138,7 +158,10 @@ final class SessionStore: ObservableObject {
         s.lastEventTimestamp = eventTime
         s.lastActivity = max(s.lastActivity, eventTime)
         if status == .running, oldStatus != .running {
-            s.activeStartedAt = eventTime
+            // 等待权限后回到 running 仍属于同一轮任务，不能重置开始时间，否则完成耗时会变成 0。
+            if s.activeStartedAt == nil || oldStatus == .idle || oldStatus == .completed || oldStatus == .error {
+                s.activeStartedAt = eventTime
+            }
             s.lastDuration = nil
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
@@ -152,6 +175,9 @@ final class SessionStore: ObservableObject {
         }
         if status == .error && oldStatus != .error {
             publishFailure(s)
+        }
+        if status == .waiting && oldStatus != .waiting {
+            publishWaiting(s)
         }
     }
 
@@ -278,6 +304,12 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(nextValue, forKey: DefaultsKey.nineGridAnimationInterval)
     }
 
+    func setNineGridIntervalVariationPercent(_ value: Double) {
+        let nextValue = SessionStore.clampedNineGridIntervalVariationPercent(value)
+        nineGridIntervalVariationPercent = nextValue
+        UserDefaults.standard.set(nextValue, forKey: DefaultsKey.nineGridIntervalVariationPercent)
+    }
+
     func requestSystemNotificationAuthorization() async -> Bool {
         let center = UNUserNotificationCenter.current()
         let settings = await loadNotificationSettings(center)
@@ -338,6 +370,11 @@ final class SessionStore: ObservableObject {
         latestFailure = FailureNotice(session: session)
     }
 
+    private func publishWaiting(_ session: Session) {
+        // waiting 来自权限/确认类 hook，只在状态跃迁时提醒，避免同一次确认重复打扰。
+        latestWaiting = WaitingNotice(session: session)
+    }
+
     nonisolated private static func loadDouble(forKey key: String, fallback: Double) -> Double {
         guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
         return UserDefaults.standard.double(forKey: key)
@@ -345,6 +382,10 @@ final class SessionStore: ObservableObject {
 
     nonisolated private static func clampedNineGridAnimationInterval(_ value: Double) -> Double {
         min(maxNineGridAnimationInterval, max(minNineGridAnimationInterval, value))
+    }
+
+    nonisolated private static func clampedNineGridIntervalVariationPercent(_ value: Double) -> Double {
+        min(maxNineGridIntervalVariationPercent, max(minNineGridIntervalVariationPercent, value))
     }
 }
 

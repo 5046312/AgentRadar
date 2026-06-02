@@ -5,24 +5,60 @@ import UserNotifications
 
 @MainActor
 final class StatusBarController: NSObject, NSPopoverDelegate {
+    private enum RunningCellTone: Int, Equatable {
+        case light
+        case normal
+        case dark
+    }
+
+    private struct StatusRenderKey: Equatable {
+        let activeCount: Int
+        let aggregateStatus: String
+        let animationStep: Int
+        let cellTones: [RunningCellTone]
+    }
+
     private let store: SessionStore
     private let statusItem: NSStatusItem
     private let popover: NSPopover
     private let completionPopover: NSPopover
+    private let minStatusAnimationTickInterval: TimeInterval = 0.08
+    private let minNoticeBubbleWidth: CGFloat = 190
+    private let maxNoticeBubbleWidth: CGFloat = 360
+    private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
     private var versionCancellable: AnyCancellable?
     private var speedCancellable: AnyCancellable?
+    private var variationCancellable: AnyCancellable?
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
+    private var waitingCancellable: AnyCancellable?
     private var completionCloseTimer: Timer?
     private var statusAnimationTimer: Timer?
-    private var cellRevealTimer: Timer?
-    private var cellRevealStartedAt: Date?
     private var activeAnimationInterval: TimeInterval?
+    private var activeAnimationVariationPercent: Double?
+    private var activeAnimationActiveCount = 0
+    private var activeAnimationOffset = 0.0
     private var statusAnimationStep = 0
-    private var cellRevealProgress: CGFloat = 1.0
+    private var statusAnimationCellTones = Array(repeating: RunningCellTone.normal, count: 9)
     private var breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
+    private var lastStatusRenderKey: StatusRenderKey?
+    private lazy var lightRunningCellGradient = NSGradient(colors: [
+        NSColor(calibratedRed: 0.78, green: 1.0, blue: 0.78, alpha: 1),
+        NSColor(calibratedRed: 0.42, green: 0.92, blue: 0.48, alpha: 1),
+        NSColor(calibratedRed: 0.10, green: 0.62, blue: 0.22, alpha: 1)
+    ])
+    private lazy var normalRunningCellGradient = NSGradient(colors: [
+        NSColor(calibratedRed: 0.62, green: 1.0, blue: 0.70, alpha: 1),
+        NSColor.systemGreen,
+        NSColor(calibratedRed: 0.04, green: 0.45, blue: 0.18, alpha: 1)
+    ])
+    private lazy var darkRunningCellGradient = NSGradient(colors: [
+        NSColor(calibratedRed: 0.38, green: 0.82, blue: 0.42, alpha: 1),
+        NSColor(calibratedRed: 0.08, green: 0.54, blue: 0.20, alpha: 1),
+        NSColor(calibratedRed: 0.01, green: 0.28, blue: 0.10, alpha: 1)
+    ])
 
     init(store: SessionStore) {
         self.store = store
@@ -40,9 +76,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         completionPopover.animates = true
 
         if let button = statusItem.button {
-            // 多屏菜单栏镜像不会稳定复制自定义 subview，改用系统 button 的 image/title 渲染更稳。
-            button.imagePosition = .imageLeading
+            // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
+            button.imagePosition = .imageOnly
             button.imageScaling = .scaleNone
+            button.attributedTitle = NSAttributedString(string: "")
             button.font = .systemFont(ofSize: 12, weight: .bold)
             button.target = self
             button.action = #selector(togglePopover(_:))
@@ -55,6 +92,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         speedCancellable = store.$nineGridAnimationInterval.sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        variationCancellable = store.$nineGridIntervalVariationPercent.sink { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
         completionCancellable = store.$latestCompletion.compactMap { $0 }.sink { [weak self] notice in
             Task { @MainActor in
                 await self?.presentCompletionNotice(notice)
@@ -63,6 +103,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         failureCancellable = store.$latestFailure.compactMap { $0 }.sink { [weak self] notice in
             Task { @MainActor in
                 await self?.presentFailureNotice(notice)
+            }
+        }
+        waitingCancellable = store.$latestWaiting.compactMap { $0 }.sink { [weak self] notice in
+            Task { @MainActor in
+                await self?.presentWaitingNotice(notice)
             }
         }
         refresh()
@@ -135,27 +180,33 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func syncStatusAnimationTimer() {
-        guard store.activeCount > 0 else {
+        let activeCount = store.activeCount
+        guard activeCount > 0 else {
             statusAnimationTimer?.invalidate()
             statusAnimationTimer = nil
-            cellRevealTimer?.invalidate()
-            cellRevealTimer = nil
-            cellRevealStartedAt = nil
             activeAnimationInterval = nil
+            activeAnimationVariationPercent = nil
+            activeAnimationActiveCount = 0
+            activeAnimationOffset = 0
             statusAnimationStep = 0
-            cellRevealProgress = 1.0
+            statusAnimationCellTones = Array(repeating: .normal, count: 9)
             breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
             return
         }
 
         let interval = store.nineGridAnimationInterval
+        let variationPercent = store.nineGridIntervalVariationPercent
         let needsIntervalUpdate = activeAnimationInterval.map { abs($0 - interval) > 0.001 } ?? true
-        guard statusAnimationTimer == nil || needsIntervalUpdate else {
+        let needsVariationUpdate = activeAnimationVariationPercent.map { abs($0 - variationPercent) > 0.001 } ?? true
+        let needsActiveCountUpdate = activeAnimationActiveCount != activeCount
+        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate else {
             return
         }
 
         statusAnimationTimer?.invalidate()
         activeAnimationInterval = interval
+        activeAnimationVariationPercent = variationPercent
+        activeAnimationActiveCount = activeCount
         if statusAnimationStep == 0 {
             advanceNineGridAnimation()
         }
@@ -186,78 +237,108 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             breathingAnimationPhase -= Double.pi * 2
         }
 
-        // 用正弦波做主节奏，只加极小随机扰动；避免 ±1s 那种明显跳变。
-        let waveOffset = sin(breathingAnimationPhase) * 0.14
-        let jitterOffset = Double.random(in: -0.035...0.035)
-        return store.nineGridAnimationInterval * (1.0 + waveOffset + jitterOffset)
+        // 浮动比例表示本次间隔相对基础速度的最大偏移，正弦负责呼吸感，随机值只打散机械节拍。
+        let variation = store.nineGridIntervalVariationPercent / 100.0
+        let waveOffset = sin(breathingAnimationPhase) * variation * 0.8
+        let jitterOffset = Double.random(in: (-variation * 0.2)...(variation * 0.2))
+        activeAnimationOffset = waveOffset + jitterOffset
+        // 多个项目同时运行时，提高亮点切换频率：2 个项目就是 2 倍速度，即间隔除以 2。
+        let activeMultiplier = max(1.0, Double(activeAnimationActiveCount))
+        return store.nineGridAnimationInterval * (1.0 + activeAnimationOffset) / activeMultiplier
     }
 
     private func clampedStatusAnimationInterval(_ interval: TimeInterval) -> TimeInterval {
         min(
             SessionStore.maxNineGridAnimationInterval,
-            max(SessionStore.minNineGridAnimationInterval, interval)
+            max(minStatusAnimationTickInterval, interval)
         )
     }
 
     private func renderStatusItem() {
+        let activeCount = store.activeCount
+        let aggregateStatus = store.aggregateStatus
         guard let button = statusItem.button else { return }
-        statusItem.length = NSStatusItem.variableLength
-        button.image = makeStatusImage()
-        button.attributedTitle = makeBadgeTitle(activeCount: store.activeCount)
+        button.imagePosition = activeCount > 0 ? .imageLeading : .imageOnly
+        updateStatusImage(activeCount: activeCount, aggregateStatus: aggregateStatus, button: button)
+        updateBadgeTitle(activeCount: activeCount, button: button)
     }
 
-    private func makeBadgeTitle(activeCount: Int) -> NSAttributedString {
-        guard activeCount > 0 else {
-            return NSAttributedString(string: "")
-        }
-        return NSAttributedString(
-            string: "\(activeCount)",
+    private func updateStatusImage(activeCount: Int, aggregateStatus: SessionStatus, button: NSStatusBarButton) {
+        let nextKey = StatusRenderKey(
+            activeCount: activeCount,
+            aggregateStatus: aggregateStatus.rawValue,
+            animationStep: statusAnimationStep,
+            cellTones: statusAnimationCellTones
+        )
+        guard lastStatusRenderKey != nextKey else { return }
+        lastStatusRenderKey = nextKey
+        button.image = makeStatusImage(activeCount: activeCount, aggregateStatus: aggregateStatus)
+    }
+
+    private func updateBadgeTitle(activeCount: Int, button: NSStatusBarButton) {
+        let nextText = activeCount > 0 ? badgeText(activeCount: activeCount) : ""
+        guard currentBadgeText != nextText else { return }
+        currentBadgeText = nextText
+        button.attributedTitle = badgeTitle(nextText)
+    }
+
+    private func badgeText(activeCount: Int) -> String {
+        activeCount > 9 ? "9+" : "\(activeCount)"
+    }
+
+    private func badgeTitle(_ text: String) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
             attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
                 .foregroundColor: NSColor.labelColor
             ]
         )
     }
 
-    private func makeStatusImage() -> NSImage {
+    private func makeStatusImage(activeCount: Int, aggregateStatus: SessionStatus) -> NSImage {
         let size = nineGridCanvasSize
         let image = NSImage(size: size)
         image.lockFocus()
-        drawNineGrid(in: NSRect(origin: .zero, size: size))
+        drawNineGrid(in: NSRect(origin: .zero, size: size), activeCount: activeCount, aggregateStatus: aggregateStatus)
         image.unlockFocus()
         image.isTemplate = false
         return image
     }
 
-    private func statusColor(alpha: CGFloat = 1.0) -> NSColor {
-        switch store.aggregateStatus {
+    private func statusColor(_ status: SessionStatus, alpha: CGFloat = 1.0) -> NSColor {
+        switch status {
         case .running:
             return NSColor.systemGreen.withAlphaComponent(alpha)
+        case .waiting:
+            return NSColor.systemYellow.withAlphaComponent(alpha)
         case .error:
             return NSColor.systemRed.withAlphaComponent(alpha)
-        case .idle, .waiting, .completed:
+        case .idle, .completed:
             return NSColor(white: 0.5, alpha: 0.35 * alpha)
         }
     }
 
-    private func drawNineGrid(in rect: NSRect) {
+    private func drawNineGrid(in rect: NSRect, activeCount: Int, aggregateStatus: SessionStatus) {
         let gap: CGFloat = 0.5
         let cell = (rect.width - gap * 2) / 3
         let corner = min(1.1, cell * 0.22)
         let litCount = min(max(statusAnimationStep, 0), 9)
+        let hasActiveSessions = activeCount > 0
 
         for index in 0..<9 {
             let row = index / 3
             let column = index % 3
-            let x = CGFloat(column) * (cell + gap)
-            let y = rect.height - cell - CGFloat(row) * (cell + gap)
+            let x = rect.minX + CGFloat(column) * (cell + gap)
+            let y = rect.minY + rect.height - cell - CGFloat(row) * (cell + gap)
             let cellRect = NSRect(x: x, y: y, width: cell, height: cell)
-            if store.activeCount > 0 {
+            if hasActiveSessions {
                 if index < litCount {
                     drawRunningCell(
                         in: cellRect,
                         corner: corner,
-                        isNewest: index == litCount - 1
+                        isNewest: index == litCount - 1,
+                        tone: statusAnimationCellTone(at: index)
                     )
                 } else {
                     emptyCellColor.setFill()
@@ -268,12 +349,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                     ).fill()
                 }
             } else {
-                switch store.aggregateStatus {
-                case .error:
-                    statusColor(alpha: 1.0).setFill()
-                case .running, .idle, .waiting, .completed:
-                    statusColor(alpha: 1.0).setFill()
-                }
+                statusColor(aggregateStatus, alpha: 1.0).setFill()
                 NSBezierPath(
                     roundedRect: cellRect,
                     xRadius: corner,
@@ -286,53 +362,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func advanceNineGridAnimation() {
         if statusAnimationStep >= 9 {
             statusAnimationStep = 0
+            statusAnimationCellTones = Array(repeating: .normal, count: 9)
         }
         statusAnimationStep += 1
-        startCellRevealAnimation()
+        statusAnimationCellTones[statusAnimationStep - 1] = runningCellTone
     }
 
-    private func startCellRevealAnimation() {
-        cellRevealTimer?.invalidate()
-        cellRevealProgress = 0
-        cellRevealStartedAt = Date()
-
-        // 每格点亮只做一次很短的淡入+放大，避免状态栏图标看起来突然跳变。
-        cellRevealTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.store.activeCount > 0 else {
-                    self.cellRevealTimer?.invalidate()
-                    self.cellRevealTimer = nil
-                    return
-                }
-
-                self.updateCellRevealProgress()
-                self.renderStatusItem()
-            }
-        }
-    }
-
-    private func updateCellRevealProgress() {
-        guard let startedAt = cellRevealStartedAt else {
-            cellRevealProgress = 1.0
-            return
-        }
-
-        let interval = activeAnimationInterval ?? store.nineGridAnimationInterval
-        let duration = min(0.22, max(0.08, interval * 0.45))
-        let progress = Date().timeIntervalSince(startedAt) / duration
-        cellRevealProgress = min(1.0, max(0, CGFloat(progress)))
-
-        if cellRevealProgress >= 1.0 {
-            cellRevealTimer?.invalidate()
-            cellRevealTimer = nil
-            cellRevealStartedAt = nil
-        }
-    }
-
-    private func drawRunningCell(in rect: NSRect, corner: CGFloat, isNewest: Bool) {
+    private func drawRunningCell(in rect: NSRect, corner: CGFloat, isNewest: Bool, tone: RunningCellTone) {
         if isNewest {
-            NSColor.systemGreen.withAlphaComponent(0.16 * cellRevealProgress).setFill()
+            runningCellGlowColor(tone: tone).withAlphaComponent(0.16).setFill()
             NSBezierPath(
                 roundedRect: rect.insetBy(dx: -0.6, dy: -0.6),
                 xRadius: corner + 0.6,
@@ -340,17 +378,52 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             ).fill()
         }
 
-        let revealProgress = isNewest ? cellRevealProgress : 1.0
-        let easedProgress = CGFloat(1 - pow(1 - Double(revealProgress), 3))
-        let inset = (1 - easedProgress) * min(rect.width, rect.height) * 0.28
-        let revealRect = rect.insetBy(dx: inset, dy: inset)
-        let path = NSBezierPath(roundedRect: revealRect, xRadius: corner, yRadius: corner)
-        let gradient = NSGradient(colors: [
-            NSColor(calibratedRed: 0.62, green: 1.0, blue: 0.70, alpha: revealProgress),
-            NSColor.systemGreen.withAlphaComponent(revealProgress),
-            NSColor(calibratedRed: 0.04, green: 0.45, blue: 0.18, alpha: revealProgress)
-        ])
-        gradient?.draw(in: path, angle: -45)
+        let path = NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner)
+        runningCellGradient(tone: tone)?.draw(in: path, angle: -45)
+    }
+
+    private func statusAnimationCellTone(at index: Int) -> RunningCellTone {
+        guard statusAnimationCellTones.indices.contains(index) else {
+            return .normal
+        }
+        return statusAnimationCellTones[index]
+    }
+
+    private var runningCellTone: RunningCellTone {
+        let variation = store.nineGridIntervalVariationPercent / 100.0
+        guard variation > 0 else { return .normal }
+
+        let firstBoundary = -variation / 3.0
+        let secondBoundary = variation / 3.0
+        if activeAnimationOffset < firstBoundary {
+            return .light
+        }
+        if activeAnimationOffset > secondBoundary {
+            return .dark
+        }
+        return .normal
+    }
+
+    private func runningCellGlowColor(tone: RunningCellTone) -> NSColor {
+        switch tone {
+        case .light:
+            return NSColor(calibratedRed: 0.48, green: 0.96, blue: 0.52, alpha: 1)
+        case .normal:
+            return NSColor.systemGreen
+        case .dark:
+            return NSColor(calibratedRed: 0.02, green: 0.38, blue: 0.14, alpha: 1)
+        }
+    }
+
+    private func runningCellGradient(tone: RunningCellTone) -> NSGradient? {
+        switch tone {
+        case .light:
+            return lightRunningCellGradient
+        case .normal:
+            return normalRunningCellGradient
+        case .dark:
+            return darkRunningCellGradient
+        }
     }
 
     private var emptyCellColor: NSColor {
@@ -391,13 +464,34 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func presentWaitingNotice(_ notice: WaitingNotice) async {
+        switch store.reminderStyle {
+        case .statusBarBubble:
+            showWaitingBubble(notice)
+        case .systemNotification:
+            if await showSystemNotification(
+                title: notice.titleText,
+                body: notice.notificationBodyText,
+                identifierPrefix: "waiting"
+            ) {
+                return
+            }
+            // 确认提醒不能静默丢掉，通知权限失效时继续回退到状态栏气泡。
+            showWaitingBubble(notice)
+        }
+    }
+
     private func showCompletionBubble(_ notice: CompletionNotice) {
         guard let button = statusItem.button else { return }
         completionCloseTimer?.invalidate()
         completionPopover.performClose(nil)
         // 用独立 popover 模拟状态栏 tooltip，避免打断主列表弹窗的内容状态。
-        completionPopover.contentSize = NSSize(width: 320, height: 90)
-        completionPopover.contentViewController = NSHostingController(rootView: CompletionNoticeView(notice: notice))
+        let width = noticeBubbleWidth(
+            title: notice.titleText,
+            lines: [notice.bubbleMessageText, notice.durationText].compactMap { $0 }
+        )
+        completionPopover.contentSize = NSSize(width: width, height: 64)
+        completionPopover.contentViewController = NSHostingController(rootView: CompletionNoticeView(notice: notice, width: width))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.completionPopover.performClose(nil) }
@@ -408,12 +502,40 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
         completionCloseTimer?.invalidate()
         completionPopover.performClose(nil)
-        completionPopover.contentSize = NSSize(width: 320, height: 72)
-        completionPopover.contentViewController = NSHostingController(rootView: FailureNoticeView(notice: notice))
+        let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
+        completionPopover.contentSize = NSSize(width: width, height: 52)
+        completionPopover.contentViewController = NSHostingController(rootView: FailureNoticeView(notice: notice, width: width))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.completionPopover.performClose(nil) }
         }
+    }
+
+    private func showWaitingBubble(_ notice: WaitingNotice) {
+        guard let button = statusItem.button else { return }
+        completionCloseTimer?.invalidate()
+        completionPopover.performClose(nil)
+        let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
+        completionPopover.contentSize = NSSize(width: width, height: 52)
+        completionPopover.contentViewController = NSHostingController(rootView: WaitingNoticeView(notice: notice, width: width))
+        completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.completionPopover.performClose(nil) }
+        }
+    }
+
+    private func noticeBubbleWidth(title: String, lines: [String]) -> CGFloat {
+        let titleWidth = measuredWidth(title, font: .systemFont(ofSize: 12, weight: .semibold))
+        let bodyWidth = lines
+            .map { measuredWidth($0, font: .systemFont(ofSize: 11)) }
+            .max() ?? 0
+        // 图标 18 + 图文间距 8 + 水平 padding 20，再留一点余量避免文字贴边。
+        let contentWidth = max(titleWidth, bodyWidth) + 18 + 8 + 24
+        return min(maxNoticeBubbleWidth, max(minNoticeBubbleWidth, ceil(contentWidth)))
+    }
+
+    private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).width
     }
 
     private func showSystemNotification(title: String, body: String, identifierPrefix: String) async -> Bool {
@@ -445,6 +567,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
 struct CompletionNoticeView: View {
     let notice: CompletionNotice
+    let width: CGFloat
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -470,13 +593,14 @@ struct CompletionNoticeView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .frame(width: 320, height: 90)
+        .padding(.vertical, 4)
+        .frame(width: width, height: 64)
     }
 }
 
 struct FailureNoticeView: View {
     let notice: FailureNotice
+    let width: CGFloat
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -496,7 +620,34 @@ struct FailureNoticeView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .frame(width: 320, height: 72)
+        .padding(.vertical, 4)
+        .frame(width: width, height: 52)
+    }
+}
+
+struct WaitingNoticeView: View {
+    let notice: WaitingNotice
+    let width: CGFloat
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: notice.runtime.iconName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .frame(width: 18, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(notice.titleText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(notice.bubbleMessageText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(width: width, height: 52)
     }
 }

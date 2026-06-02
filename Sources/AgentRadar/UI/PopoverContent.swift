@@ -9,6 +9,7 @@ struct PopoverContent: View {
     @State private var showingHelp = false
     @State private var showingSettings = false
     @State private var now = Date()
+    @State private var clockTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,8 +32,17 @@ struct PopoverContent: View {
         .frame(width: 380, height: 440)
         // 弹窗内操作以鼠标为主，统一关掉按钮获得焦点时的系统光环。
         .focusEffectDisabled()
-        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { tick in
-            now = tick
+        .onAppear {
+            syncClockTimer()
+        }
+        .onDisappear {
+            stopClockTimer()
+        }
+        .onChange(of: selectedRuntime) { _, _ in
+            syncClockTimer()
+        }
+        .onReceive(store.$version) { _ in
+            syncClockTimer()
         }
     }
 
@@ -67,8 +77,6 @@ struct PopoverContent: View {
                     HookHelpView()
                 }
                 Spacer()
-                statusChip(label: "运行 \(count(.running))", color: .green)
-                statusChip(label: "等待 \(count(.waiting))", color: .yellow)
             }
 
             HStack(spacing: 6) {
@@ -151,18 +159,6 @@ struct PopoverContent: View {
         .buttonStyle(.plain)
     }
 
-    private func statusChip(label: String, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(label).font(.system(size: 10))
-        }
-        .foregroundStyle(.secondary)
-    }
-
-    private func count(_ status: SessionStatus) -> Int {
-        store.count(status, runtime: selectedRuntime)
-    }
-
     private var runtimeDirLabel: String {
         switch selectedRuntime {
         case .claude: return "~/.claude"
@@ -179,6 +175,30 @@ struct PopoverContent: View {
             url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         }
         NSWorkspace.shared.open(url)
+    }
+
+    private func syncClockTimer() {
+        guard store.count(.running, runtime: selectedRuntime) > 0 else {
+            stopClockTimer()
+            return
+        }
+        startClockTimer()
+    }
+
+    private func startClockTimer() {
+        guard clockTimer == nil else { return }
+        now = Date()
+        // 运行时长只需要秒级刷新；弹窗关闭或当前 runtime 无运行任务时停掉，避免后台空转。
+        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+            now = Date()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        clockTimer = timer
+    }
+
+    private func stopClockTimer() {
+        clockTimer?.invalidate()
+        clockTimer = nil
     }
 }
 
@@ -214,6 +234,7 @@ private struct HookSettingsView: View {
     @ObservedObject var sessionStore: SessionStore
     @State private var reminderMessage: String?
     @State private var reminderErrorMessage: String?
+    @State private var intervalVariationText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -288,7 +309,7 @@ private struct HookSettingsView: View {
                     in: SessionStore.minNineGridAnimationInterval...SessionStore.maxNineGridAnimationInterval,
                     step: 0.05
                 ) {
-                    Text("九宫格速度")
+                    EmptyView()
                 } minimumValueLabel: {
                     Text("快")
                         .font(.system(size: 10))
@@ -298,17 +319,31 @@ private struct HookSettingsView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
+                .accessibilityLabel("九宫格速度")
 
                 Text(nineGridAnimationDescription)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
 
-            Text("安装前会先显示 diff 预览。确认后直接覆盖目标文件，不再备份；重启当前会话后才生效。")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Text("间隔浮动比例")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("50", text: intervalVariationTextBinding)
+                        .font(.system(size: 11, design: .monospaced))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 54)
+                    Text("%")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(nineGridVariationDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(14)
         .frame(width: 360, alignment: .leading)
@@ -325,6 +360,12 @@ private struct HookSettingsView: View {
             if let pendingPlan = store.pendingPlan {
                 HookInstallPreviewSheet(store: store, plan: pendingPlan)
             }
+        }
+        .onAppear {
+            syncIntervalVariationText()
+        }
+        .onReceive(sessionStore.$nineGridIntervalVariationPercent) { _ in
+            syncIntervalVariationText()
         }
     }
 
@@ -348,6 +389,18 @@ private struct HookSettingsView: View {
         )
     }
 
+    private var intervalVariationTextBinding: Binding<String> {
+        Binding(
+            get: { intervalVariationText },
+            set: { newValue in
+                let filtered = numericText(from: newValue)
+                intervalVariationText = filtered
+                guard let value = Double(filtered) else { return }
+                sessionStore.setNineGridIntervalVariationPercent(value)
+            }
+        )
+    }
+
     private var reminderDescription: String {
         switch sessionStore.reminderStyle {
         case .statusBarBubble:
@@ -359,6 +412,10 @@ private struct HookSettingsView: View {
 
     private var nineGridAnimationDescription: String {
         "当前 \(formatInterval(sessionStore.nineGridAnimationInterval)) 秒/格，可在 \(formatInterval(SessionStore.minNineGridAnimationInterval)) 到 \(formatInterval(SessionStore.maxNineGridAnimationInterval)) 秒之间调整。"
+    }
+
+    private var nineGridVariationDescription: String {
+        "当前左右浮动 ±\(formatPercent(sessionStore.nineGridIntervalVariationPercent))%，可填 0 到 100 的数字。"
     }
 
     private func applyReminderStyle(_ style: ReminderStyle) async {
@@ -407,6 +464,20 @@ private struct HookSettingsView: View {
 
     private func formatInterval(_ value: Double) -> String {
         String(format: "%.2f", value)
+    }
+
+    private func formatPercent(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+
+    private func syncIntervalVariationText() {
+        intervalVariationText = formatPercent(sessionStore.nineGridIntervalVariationPercent)
+    }
+
+    private func numericText(from value: String) -> String {
+        value.filter { character in
+            character.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+        }
     }
 }
 

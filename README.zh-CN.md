@@ -6,23 +6,25 @@
   <img src="Assets/AppIcon-1024.png" width="96" alt="AgentRadar app icon">
 </p>
 
-AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 Codex 的项目级任务状态。
+AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 Codex 的项目级任务状态。它读取本机会话数据，记录 hooks 事件，并在任务等待确认、完成或失败时提醒检查。
 
-## 功能
+## 亮点
 
-- 状态栏固定使用 3x3 九宫格图标，并显示运行中任务数字角标。
-- 运行中按基础速度逐个点亮绿色渐变格子，并带轻微呼吸节奏；满 9 格后从第一格重新开始。
-- 弹窗展示 runtime 切换和项目级状态。
-- 任务完成和失败支持状态栏气泡或系统消息提醒。
+- 紧凑弹窗，只展示项目级状态。
+- 状态栏固定使用 3x3 九宫格图标，运行中项目数量显示在图标右侧。
+- 运行中每个 tick 多点亮一格，带轻微绿色层次变化；亮点速度会随运行中项目数量加快。
+- 运行中的项目显示从任务开始累计的运行时长。
+- 任务完成、失败、等待确认支持状态栏气泡或系统消息提醒。
+- 状态栏气泡会根据内容自适应宽度；完成提醒会显示耗时。
 - 内置 hooks 安装器，写入前先展示 diff 预览。
-- 原生 Swift/AppKit/SwiftUI，无第三方运行依赖。
+- 原生 Swift/AppKit/SwiftUI，无 `jq` 或第三方运行依赖。
 
-## 状态来源
+## 状态检测
 
-- Claude 读取 `~/.claude/projects/**/*.jsonl`，并通过 hooks 提高等待、完成状态的准确性。
-- Codex 状态只依赖 hooks；JSONL 用于补充项目和会话信息。
-- hooks 事件统一追加到 `~/.agentradar/events.jsonl`。
-- Codex 内部 memory 路径和根目录内部任务会被忽略，不显示成用户项目。
+- Claude 读取 `~/.claude/projects/**/*.jsonl`；hooks 用来提高运行、等待、完成状态的准确性。
+- Codex 任务状态只依赖 hooks；JSONL/transcript 只用于补充项目、会话信息和最终回合结果。
+- hooks 事件统一追加到 `~/.agentradar/events.jsonl`，应用会监听文件变化，并每秒兜底读取一次新增事件。
+- 缺少 `transcript_path` 的 Codex 事件、根目录 `/` 任务、内部 memory 路径会被忽略，避免内部后台任务显示成用户项目。
 
 ## 系统要求
 
@@ -51,6 +53,15 @@ open ./AgentRadar.app
 
 安装逻辑由 AgentRadar 原生实现，不依赖 `jq`。它会更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。
 
+AgentRadar 安装的 Claude hooks：
+
+- `Stop`
+- `SubagentStop`
+- `Notification`
+- `PreToolUse`
+- `PostToolUse`
+- `UserPromptSubmit`
+
 AgentRadar 安装的 Codex hooks：
 
 - `UserPromptSubmit`
@@ -65,7 +76,9 @@ AgentRadar 安装的 Codex hooks：
 
 - 提醒方式：状态栏气泡或系统消息。
 - 音效：可开关任务完成音效。
-- 九宫格速度：默认基础速度 1 秒/格，可在设置中调整。
+- 九宫格速度：默认基础速度 1 秒/格，可在 0.25 到 2 秒/格之间调整。
+- 亮点切换速度会乘以运行中项目数。
+- 间隔左右浮动默认 ±50%，输入时只填 0 到 100 的数字。
 
 ## 打包 DMG
 

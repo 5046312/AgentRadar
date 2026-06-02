@@ -82,6 +82,17 @@ struct FailureNotice: Identifiable, Equatable {
     }
 }
 
+struct WaitingNotice: Identifiable, Equatable {
+    let id = UUID()
+    let runtime: RuntimeKind
+    let projectName: String
+
+    init(session: Session) {
+        runtime = session.runtime
+        projectName = session.projectName
+    }
+}
+
 extension CompletionNotice {
     var titleText: String {
         projectName
@@ -101,7 +112,7 @@ extension CompletionNotice {
 
     var durationText: String? {
         guard let duration else { return nil }
-        let totalSeconds = max(0, Int(duration.rounded()))
+        let totalSeconds = max(1, Int(duration.rounded(.up)))
         let hours = totalSeconds / 3600
         let minutes = (totalSeconds % 3600) / 60
         let seconds = totalSeconds % 60
@@ -113,6 +124,24 @@ extension CompletionNotice {
             return "耗时 \(minutes)分\(seconds)秒"
         }
         return "耗时 \(seconds)秒"
+    }
+}
+
+extension WaitingNotice {
+    var titleText: String {
+        projectName
+    }
+
+    var bubbleMessageText: String {
+        "需要用户确认，请及时处理"
+    }
+
+    var messageText: String {
+        "需要用户确认，请及时处理"
+    }
+
+    var notificationBodyText: String {
+        messageText
     }
 }
 

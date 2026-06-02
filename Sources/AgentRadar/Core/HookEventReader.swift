@@ -65,12 +65,23 @@ final class HookEventReader {
     }
 
     private func drain() {
+        guard let fileSize = currentFileSize() else { return }
+        if fileSize < fileOffset {
+            fileOffset = 0
+        }
+        guard fileSize > fileOffset else { return }
+
         let (lines, newOffset) = JSONLReader.readNewLines(from: url, startingAt: fileOffset)
         fileOffset = newOffset
         for line in lines {
             guard let event = try? JSONDecoder().decode(HookEvent.self, from: line) else { continue }
             apply(event)
         }
+    }
+
+    private func currentFileSize() -> UInt64? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return attrs?[.size] as? UInt64
     }
 
     private func apply(_ event: HookEvent) {
