@@ -28,6 +28,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
+    private var noticeEventMonitor: Any?
+    private var noticeResignObserver: Any?
     private var versionCancellable: AnyCancellable?
     private var speedCancellable: AnyCancellable?
     private var variationCancellable: AnyCancellable?
@@ -72,8 +74,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 420)
         popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store))
-        completionPopover.behavior = .transient
+        completionPopover.behavior = .applicationDefined
         completionPopover.animates = true
+        completionPopover.delegate = self
 
         if let button = statusItem.button {
             // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
@@ -139,6 +142,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.performClose(sender)
     }
 
+    private func closeNoticePopover(_ sender: Any?) {
+        completionCloseTimer?.invalidate()
+        completionCloseTimer = nil
+        guard completionPopover.isShown else { return }
+        completionPopover.performClose(sender)
+    }
+
     private func installPopoverCloseHandlers() {
         removePopoverCloseHandlers()
         // 系统 transient 在多屏切换时会重新绑定当前屏的状态栏按钮，关闭动画就会“飞走”。
@@ -159,6 +169,26 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func installNoticeCloseHandlers() {
+        removeNoticeCloseHandlers()
+        // 提醒气泡和主弹窗共用同一个状态栏锚点；这里也不能走系统 transient，
+        // 否则切到别的屏幕后系统会按当前焦点屏重绑按钮，关闭动画就会看起来像“漂移”。
+        noticeEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                self?.closeNoticePopover(nil)
+            }
+        }
+        noticeResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.closeNoticePopover(nil)
+            }
+        }
+    }
+
     private func removePopoverCloseHandlers() {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -170,8 +200,28 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func removeNoticeCloseHandlers() {
+        if let noticeEventMonitor {
+            NSEvent.removeMonitor(noticeEventMonitor)
+            self.noticeEventMonitor = nil
+        }
+        if let noticeResignObserver {
+            NotificationCenter.default.removeObserver(noticeResignObserver)
+            self.noticeResignObserver = nil
+        }
+    }
+
     func popoverDidClose(_ notification: Notification) {
-        removePopoverCloseHandlers()
+        guard let closedPopover = notification.object as? NSPopover else { return }
+        if closedPopover === popover {
+            removePopoverCloseHandlers()
+            return
+        }
+        if closedPopover === completionPopover {
+            removeNoticeCloseHandlers()
+            completionCloseTimer?.invalidate()
+            completionCloseTimer = nil
+        }
     }
 
     private func refresh() {
@@ -483,8 +533,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private func showCompletionBubble(_ notice: CompletionNotice) {
         guard let button = statusItem.button else { return }
-        completionCloseTimer?.invalidate()
-        completionPopover.performClose(nil)
+        closeNoticePopover(nil)
         // 用独立 popover 模拟状态栏 tooltip，避免打断主列表弹窗的内容状态。
         let width = noticeBubbleWidth(
             title: notice.titleText,
@@ -493,34 +542,35 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         completionPopover.contentSize = NSSize(width: width, height: 64)
         completionPopover.contentViewController = NSHostingController(rootView: CompletionNoticeView(notice: notice, width: width))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        installNoticeCloseHandlers()
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.completionPopover.performClose(nil) }
+            Task { @MainActor in self?.closeNoticePopover(nil) }
         }
     }
 
     private func showFailureBubble(_ notice: FailureNotice) {
         guard let button = statusItem.button else { return }
-        completionCloseTimer?.invalidate()
-        completionPopover.performClose(nil)
+        closeNoticePopover(nil)
         let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
         completionPopover.contentSize = NSSize(width: width, height: 52)
         completionPopover.contentViewController = NSHostingController(rootView: FailureNoticeView(notice: notice, width: width))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        installNoticeCloseHandlers()
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.completionPopover.performClose(nil) }
+            Task { @MainActor in self?.closeNoticePopover(nil) }
         }
     }
 
     private func showWaitingBubble(_ notice: WaitingNotice) {
         guard let button = statusItem.button else { return }
-        completionCloseTimer?.invalidate()
-        completionPopover.performClose(nil)
+        closeNoticePopover(nil)
         let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
         completionPopover.contentSize = NSSize(width: width, height: 52)
         completionPopover.contentViewController = NSHostingController(rootView: WaitingNoticeView(notice: notice, width: width))
         completionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        installNoticeCloseHandlers()
         completionCloseTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.completionPopover.performClose(nil) }
+            Task { @MainActor in self?.closeNoticePopover(nil) }
         }
     }
 
