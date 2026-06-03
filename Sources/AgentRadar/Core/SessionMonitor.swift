@@ -305,6 +305,10 @@ final class SessionMonitor {
     }
 
     private func applyCodexStatusEvent(_ event: CodexTranscriptStatusEvent, to session: inout Session, eventTime: Date) {
+        // Stop hook 可能先把任务收掉，随后 FSEvents 才补读到更早的 task_started，不能让旧事件倒灌回 running。
+        guard eventTime >= session.lastEventTimestamp else {
+            return
+        }
         session.lastEventTimestamp = eventTime
 
         switch event {

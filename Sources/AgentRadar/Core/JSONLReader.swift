@@ -140,9 +140,9 @@ enum JSONLReader {
             return nil
         }
         // Codex 完成只由 Stop hook 触发；这里先统一补时间和 cwd，非完成状态兜底单独解析 event_msg。
-        let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let type = obj["type"] as? String
         let payload = obj["payload"] as? [String: Any]
+        let timestamp = parseCodexTimestamp(type: type, payload: payload, fallback: obj["timestamp"] as? String) ?? Date()
 
         var cwd = payload?["cwd"] as? String
 
@@ -273,6 +273,31 @@ enum JSONLReader {
         guard let s = s else { return nil }
         if let d = fractionalTimestampFormatter.date(from: s) { return d }
         return internetTimestampFormatter.date(from: s)
+    }
+
+    private static func parseCodexTimestamp(type: String?, payload: [String: Any]?, fallback: String?) -> Date? {
+        guard type == "event_msg", let payload else {
+            return parseTimestamp(fallback)
+        }
+
+        // Codex event_msg 没有顶层 timestamp；不用 payload 时间会把历史补读误判成“现在发生”。
+        if let startedAt = unixTimestamp(payload["started_at"]) {
+            return startedAt
+        }
+        if let completedAt = unixTimestamp(payload["completed_at"]) {
+            return completedAt
+        }
+        return parseTimestamp(fallback)
+    }
+
+    private static func unixTimestamp(_ value: Any?) -> Date? {
+        if let value = value as? TimeInterval {
+            return Date(timeIntervalSince1970: value)
+        }
+        if let value = value as? Int {
+            return Date(timeIntervalSince1970: TimeInterval(value))
+        }
+        return nil
     }
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {

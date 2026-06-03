@@ -385,6 +385,17 @@ final class SessionStore: ObservableObject {
     func tickIdle(now: Date = Date()) {
         var changed = false
         for (id, var s) in sessions {
+            if s.status == .running, s.runtime == .codex, shouldSettleCodexSession(s, now: now) {
+                s.status = .idle
+                s.activeTurnId = nil
+                if let startedAt = s.activeStartedAt {
+                    s.lastDuration = max(0, now.timeIntervalSince(startedAt))
+                }
+                s.completedFlashUntil = nil
+                sessions[id] = s
+                changed = true
+                continue
+            }
             if s.status == .completed, let until = s.completedFlashUntil, now > until {
                 s.status = .idle
                 s.completedFlashUntil = nil
@@ -402,6 +413,24 @@ final class SessionStore: ObservableObject {
             }
         }
         if changed { version &+= 1 }
+    }
+
+    private func shouldSettleCodexSession(_ session: Session, now: Date) -> Bool {
+        guard
+            let turnId = session.activeTurnId,
+            session.fileURL.pathExtension == "jsonl",
+            now.timeIntervalSince(session.lastActivity) > 5
+        else {
+            return false
+        }
+
+        // 完成提醒仍只靠 Stop hook；这里仅处理窗口已关、Stop 未被 App 读到时的 stale running。
+        switch JSONLReader.codexTurnOutcome(at: session.fileURL, turnId: turnId) {
+        case .completed, .interrupted, .failed:
+            return true
+        case .pending:
+            return false
+        }
     }
 
     func toggleSound() {
