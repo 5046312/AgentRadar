@@ -17,7 +17,7 @@ struct ProjectGroup: Identifiable {
     }
 
     var visibleTaskSessions: [Session] {
-        // 旧 idle 历史继续折叠；本次打开后完成的任务要保留一行，才能显示“上次完成”。
+        // 旧 idle 历史继续折叠；本次打开后完成的任务要保留一行，才能显示完成后的相对时间。
         sessions.filter { $0.status != .idle || $0.lastCompletedAt != nil }
     }
 
@@ -87,7 +87,7 @@ private func elapsedDurationText(from startedAt: Date, to now: Date) -> String {
 }
 
 private func idleAfterCompletionLabel(from completedAt: Date, to now: Date) -> String {
-    "空闲(上次完成\(relativePastText(from: completedAt, to: now)))"
+    "空闲(\(relativePastText(from: completedAt, to: now)))"
 }
 
 private func relativePastText(from date: Date, to now: Date) -> String {
@@ -110,7 +110,6 @@ private func relativePastText(from date: Date, to now: Date) -> String {
 final class SessionStore: ObservableObject {
     private enum DefaultsKey {
         static let soundEnabled = "soundEnabled"
-        static let reminderStyle = "reminderStyle"
         static let nineGridAnimationInterval = "nineGridAnimationInterval"
         static let nineGridIntervalVariationPercent = "nineGridIntervalVariationPercent"
     }
@@ -128,10 +127,6 @@ final class SessionStore: ObservableObject {
     @Published private(set) var latestFailure: FailureNotice?
     @Published private(set) var latestWaiting: WaitingNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
-    @Published var reminderStyle: ReminderStyle = {
-        let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.reminderStyle)
-        return ReminderStyle(rawValue: rawValue ?? "") ?? .statusBarBubble
-    }()
     @Published var nineGridAnimationInterval: Double = SessionStore.clampedNineGridAnimationInterval(SessionStore.loadDouble(
         forKey: DefaultsKey.nineGridAnimationInterval,
         fallback: SessionStore.defaultNineGridAnimationInterval
@@ -140,6 +135,7 @@ final class SessionStore: ObservableObject {
         forKey: DefaultsKey.nineGridIntervalVariationPercent,
         fallback: SessionStore.defaultNineGridIntervalVariationPercent
     ))
+    private var codexThreadNames: [String: String] = [:]
 
     private var trackedSessions: [Session] {
         // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
@@ -200,9 +196,19 @@ final class SessionStore: ObservableObject {
         trackedSessions.filter { $0.status == .running }.count
     }
 
+    var hasWaitingInActiveProject: Bool {
+        let activeProjectPaths = Set(trackedSessions.filter { $0.status == .running }.map(\.projectPath))
+        guard !activeProjectPaths.isEmpty else { return false }
+        // 同一项目还在运行时，等待确认任务要影响后续状态栏 tick 颜色，提示用户介入。
+        return trackedSessions.contains { session in
+            session.status == .waiting && activeProjectPaths.contains(session.projectPath)
+        }
+    }
+
     func upsert(_ session: Session, notify: Bool = true) {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
-        let nextSession = session
+        var nextSession = session
+        applyCodexThreadName(to: &nextSession)
         let oldStatus = sessions[nextSession.id]?.status
         sessions[nextSession.id] = nextSession
         version &+= 1
@@ -211,20 +217,40 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func setStatus(id: String, status: SessionStatus, eventTime: Date = Date(), flashUntil: Date? = nil) {
+    func updateCodexThreadNames(_ names: [String: String]) {
+        codexThreadNames = names
+        var changed = false
+
+        for (id, var session) in sessions {
+            guard session.runtime == .codex else { continue }
+            let oldTaskName = session.taskName
+            applyCodexThreadName(to: &session)
+            guard session.taskName != oldTaskName else { continue }
+            sessions[id] = session
+            changed = true
+        }
+
+        if changed { version &+= 1 }
+    }
+
+    func setStatus(id: String, status: SessionStatus, eventTime: Date = Date(), flashUntil: Date? = nil, turnId: String? = nil) {
         guard var s = sessions[id] else { return }
         guard !PathUtils.isIgnoredProjectPath(s.projectPath) else { return }
         let oldStatus = s.status
         s.status = status
         s.lastEventTimestamp = eventTime
         s.lastActivity = max(s.lastActivity, eventTime)
-        if status == .running, oldStatus != .running {
-            // 等待权限后回到 running 仍属于同一轮任务，不能重置开始时间，否则完成耗时会变成 0。
-            if s.activeStartedAt == nil || oldStatus == .idle || oldStatus == .completed || oldStatus == .error {
+        if status == .running {
+            let isNewTurn = turnId != nil && turnId != s.activeTurnId
+            // 等待权限后回到 running 仍属于同一轮任务；只有新 turn 才重置开始时间。
+            if s.activeStartedAt == nil || oldStatus == .idle || oldStatus == .completed || oldStatus == .error || isNewTurn {
                 s.activeStartedAt = eventTime
             }
             s.lastDuration = nil
             s.lastCompletedAt = nil
+            if let turnId {
+                s.activeTurnId = turnId
+            }
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
             s.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
@@ -232,7 +258,11 @@ final class SessionStore: ObservableObject {
         if status == .completed, oldStatus != .completed {
             s.lastCompletedAt = eventTime
         }
+        if status == .completed || status == .error || status == .idle {
+            s.activeTurnId = nil
+        }
         if let f = flashUntil { s.completedFlashUntil = f }
+        applyCodexThreadName(to: &s)
         sessions[id] = s
         version &+= 1
         if status == .completed && oldStatus != .completed {
@@ -246,7 +276,7 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func setHookStatus(runtime: RuntimeKind, rawSessionId: String?, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, transcriptPath: String? = nil, flashUntil: Date? = nil) {
+    func setHookStatus(runtime: RuntimeKind, rawSessionId: String?, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, transcriptPath: String? = nil, turnId: String? = nil, flashUntil: Date? = nil) {
         // hook 事件可能早于 session 文件落盘；先建占位，后续 JSONL 再补齐详情。
         if let rawSessionId, !rawSessionId.isEmpty {
             let id = "\(runtime.rawValue):\(rawSessionId)"
@@ -268,17 +298,17 @@ final class SessionStore: ObservableObject {
                 }
                 sessions[id] = existing
             }
-            setStatus(id: id, status: status, eventTime: eventTime, flashUntil: flashUntil)
+            setStatus(id: id, status: status, eventTime: eventTime, flashUntil: flashUntil, turnId: turnId)
             return
         }
         if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
            PathUtils.isIgnoredProjectPath(cwd) {
             return
         }
-        setRuntimeStatus(runtime: runtime, status: status, eventTime: eventTime, cwd: cwd, flashUntil: flashUntil)
+        setRuntimeStatus(runtime: runtime, status: status, eventTime: eventTime, cwd: cwd, turnId: turnId, flashUntil: flashUntil)
     }
 
-    func setRuntimeStatus(runtime: RuntimeKind, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, flashUntil: Date? = nil) {
+    func setRuntimeStatus(runtime: RuntimeKind, status: SessionStatus, eventTime: Date = Date(), cwd: String? = nil, turnId: String? = nil, flashUntil: Date? = nil) {
         // Codex hook 可能只带 cwd，不带 session_id；用 cwd 缩小范围后取最近活跃会话。
         let candidates = trackedSessions.filter { session in
             guard session.runtime == runtime else { return false }
@@ -290,13 +320,13 @@ final class SessionStore: ObservableObject {
         }).first else {
             return
         }
-        setStatus(id: target.id, status: status, eventTime: eventTime, flashUntil: flashUntil)
+        setStatus(id: target.id, status: status, eventTime: eventTime, flashUntil: flashUntil, turnId: turnId)
     }
 
     private func placeholderSession(id: String, runtime: RuntimeKind, cwd: String?, transcriptURL: URL?, eventTime: Date) -> Session {
         let projectPath = cwd?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
             ?? PathUtils.sessionsDir(for: runtime).path
-        return Session(
+        var session = Session(
             id: id,
             runtime: runtime,
             projectPath: projectPath,
@@ -304,13 +334,33 @@ final class SessionStore: ObservableObject {
             status: .idle,
             lastActivity: eventTime,
             lastEventTimestamp: eventTime,
+            taskName: nil,
             activeStartedAt: nil,
+            activeTurnId: nil,
             fileURL: transcriptURL ?? PathUtils.sessionsDir(for: runtime),
             fileOffset: transcriptOffsetBaseline(for: transcriptURL),
             completedFlashUntil: nil,
             lastDuration: nil,
             lastCompletedAt: nil
         )
+        applyCodexThreadName(to: &session)
+        return session
+    }
+
+    private func applyCodexThreadName(to session: inout Session) {
+        guard
+            session.runtime == .codex,
+            let threadName = codexThreadNames[rawSessionId(from: session)]
+        else {
+            return
+        }
+        session.taskName = threadName
+    }
+
+    private func rawSessionId(from session: Session) -> String {
+        let prefix = "\(session.runtime.rawValue):"
+        guard session.id.hasPrefix(prefix) else { return session.id }
+        return String(session.id.dropFirst(prefix.count))
     }
 
     private func transcriptURL(from path: String?) -> URL? {
@@ -359,11 +409,6 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(soundEnabled, forKey: DefaultsKey.soundEnabled)
     }
 
-    func setReminderStyle(_ style: ReminderStyle) {
-        reminderStyle = style
-        UserDefaults.standard.set(style.rawValue, forKey: DefaultsKey.reminderStyle)
-    }
-
     func setNineGridAnimationInterval(_ value: Double) {
         let nextValue = SessionStore.clampedNineGridAnimationInterval(value)
         nineGridAnimationInterval = nextValue
@@ -383,7 +428,7 @@ final class SessionStore: ObservableObject {
         case .authorized, .provisional:
             return true
         case .notDetermined:
-            // 只在用户主动切到系统消息时申请权限，避免首次启动就打断。
+            // 只在用户主动点击设置按钮时申请权限，避免首次启动就打断。
             return await requestNotificationAuthorization(center)
         case .denied:
             return false

@@ -24,6 +24,10 @@ enum PathUtils {
         codexDirectory.appendingPathComponent("hooks.json")
     }
 
+    static var codexSessionIndexFile: URL {
+        codexDirectory.appendingPathComponent("session_index.jsonl")
+    }
+
     static var codexSessionsDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".codex/sessions", isDirectory: true)

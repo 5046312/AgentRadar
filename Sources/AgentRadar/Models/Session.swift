@@ -21,20 +21,6 @@ enum RuntimeKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum ReminderStyle: String, Codable, CaseIterable, Identifiable {
-    case statusBarBubble
-    case systemNotification
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .statusBarBubble: return "状态栏气泡"
-        case .systemNotification: return "系统消息"
-        }
-    }
-}
-
 enum SessionStatus: String, Codable {
     case running
     case waiting
@@ -51,7 +37,9 @@ struct Session: Identifiable, Equatable {
     var status: SessionStatus
     var lastActivity: Date
     var lastEventTimestamp: Date
+    var taskName: String?
     var activeStartedAt: Date?
+    var activeTurnId: String?
     var fileURL: URL
     var fileOffset: UInt64
     var completedFlashUntil: Date?
@@ -61,12 +49,10 @@ struct Session: Identifiable, Equatable {
 
 struct CompletionNotice: Identifiable, Equatable {
     let id = UUID()
-    let runtime: RuntimeKind
     let projectName: String
     let duration: TimeInterval?
 
     init(session: Session) {
-        runtime = session.runtime
         projectName = session.projectName
         duration = session.lastDuration
     }
@@ -74,22 +60,18 @@ struct CompletionNotice: Identifiable, Equatable {
 
 struct FailureNotice: Identifiable, Equatable {
     let id = UUID()
-    let runtime: RuntimeKind
     let projectName: String
 
     init(session: Session) {
-        runtime = session.runtime
         projectName = session.projectName
     }
 }
 
 struct WaitingNotice: Identifiable, Equatable {
     let id = UUID()
-    let runtime: RuntimeKind
     let projectName: String
 
     init(session: Session) {
-        runtime = session.runtime
         projectName = session.projectName
     }
 }
@@ -97,10 +79,6 @@ struct WaitingNotice: Identifiable, Equatable {
 extension CompletionNotice {
     var titleText: String {
         projectName
-    }
-
-    var bubbleMessageText: String {
-        "任务完成，请及时审阅"
     }
 
     var messageText: String {
@@ -133,10 +111,6 @@ extension WaitingNotice {
         projectName
     }
 
-    var bubbleMessageText: String {
-        "需要用户确认，请及时处理"
-    }
-
     var messageText: String {
         "需要用户确认，请及时处理"
     }
@@ -151,21 +125,11 @@ extension FailureNotice {
         projectName
     }
 
-    var bubbleMessageText: String {
-        "任务失败，请及时审阅"
-    }
-
     var messageText: String {
         "任务失败，请及时审阅"
     }
 
     var notificationBodyText: String {
         messageText
-    }
-}
-
-private extension String {
-    var nonEmpty: String? {
-        isEmpty ? nil : self
     }
 }

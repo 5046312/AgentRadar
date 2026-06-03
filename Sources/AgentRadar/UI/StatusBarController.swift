@@ -9,11 +9,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         case light
         case normal
         case dark
+        case waiting
     }
 
     private struct StatusRenderKey: Equatable {
         let activeCount: Int
         let aggregateStatus: String
+        let hasWaitingInActiveProject: Bool
         let animationStep: Int
         let cellTones: [RunningCellTone]
     }
@@ -21,10 +23,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let store: SessionStore
     private let statusItem: NSStatusItem
     private let popover: NSPopover
-    private let noticePopover: NSPopover
     private let minStatusAnimationTickInterval: TimeInterval = 0.08
-    private let minNoticeBubbleWidth: CGFloat = 190
-    private let maxNoticeBubbleWidth: CGFloat = 360
     private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
@@ -34,8 +33,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var waitingCancellable: AnyCancellable?
-    private var noticeCloseTimer: Timer?
-    private var noticePresentationSerial = 0
     private var statusAnimationTimer: Timer?
     private var activeAnimationInterval: TimeInterval?
     private var activeAnimationVariationPercent: Double?
@@ -60,12 +57,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         NSColor(calibratedRed: 0.08, green: 0.54, blue: 0.20, alpha: 1),
         NSColor(calibratedRed: 0.01, green: 0.28, blue: 0.10, alpha: 1)
     ])
+    private lazy var waitingRunningCellGradient = NSGradient(colors: [
+        NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.42, alpha: 1),
+        NSColor.systemYellow,
+        NSColor(calibratedRed: 0.82, green: 0.55, blue: 0.08, alpha: 1)
+    ])
 
     init(store: SessionStore) {
         self.store = store
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
-        self.noticePopover = NSPopover()
         super.init()
 
         popover.behavior = .applicationDefined
@@ -73,10 +74,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 420)
         popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store))
-
-        noticePopover.behavior = .transient
-        noticePopover.animates = true
-        noticePopover.delegate = self
 
         if let button = statusItem.button {
             // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
@@ -142,14 +139,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.performClose(sender)
     }
 
-    private func closeNoticeBubble() {
-        noticePresentationSerial &+= 1
-        noticeCloseTimer?.invalidate()
-        noticeCloseTimer = nil
-        guard noticePopover.isShown else { return }
-        noticePopover.performClose(nil)
-    }
-
     private func installPopoverCloseHandlers() {
         removePopoverCloseHandlers()
         // 系统 transient 在多屏切换时会重新绑定当前屏的状态栏按钮，关闭动画就会“飞走”。
@@ -185,9 +174,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard let closedPopover = notification.object as? NSPopover else { return }
         if closedPopover === popover {
             removePopoverCloseHandlers()
-        } else if closedPopover === noticePopover {
-            noticeCloseTimer?.invalidate()
-            noticeCloseTimer = nil
         }
     }
 
@@ -284,6 +270,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let nextKey = StatusRenderKey(
             activeCount: activeCount,
             aggregateStatus: aggregateStatus.rawValue,
+            hasWaitingInActiveProject: store.hasWaitingInActiveProject,
             animationStep: statusAnimationStep,
             cellTones: statusAnimationCellTones
         )
@@ -407,6 +394,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private var runningCellTone: RunningCellTone {
+        if store.hasWaitingInActiveProject {
+            return .waiting
+        }
+
         let variation = store.nineGridIntervalVariationPercent / 100.0
         guard variation > 0 else { return .normal }
 
@@ -429,6 +420,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             return NSColor.systemGreen
         case .dark:
             return NSColor(calibratedRed: 0.02, green: 0.38, blue: 0.14, alpha: 1)
+        case .waiting:
+            return NSColor.systemYellow
         }
     }
 
@@ -440,6 +433,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             return normalRunningCellGradient
         case .dark:
             return darkRunningCellGradient
+        case .waiting:
+            return waitingRunningCellGradient
         }
     }
 
@@ -448,116 +443,27 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
-        switch store.reminderStyle {
-        case .statusBarBubble:
-            showCompletionBubble(notice)
-        case .systemNotification:
-            if await showSystemNotification(
-                title: notice.titleText,
-                body: notice.notificationBodyText,
-                identifierPrefix: "completion"
-            ) {
-                return
-            }
-            // 用户后来手动关掉通知权限时，仍然回退到气泡，避免完成事件被吞掉。
-            showCompletionBubble(notice)
-        }
+        _ = await showSystemNotification(
+            title: notice.titleText,
+            body: notice.notificationBodyText,
+            identifierPrefix: "completion"
+        )
     }
 
     private func presentFailureNotice(_ notice: FailureNotice) async {
-        switch store.reminderStyle {
-        case .statusBarBubble:
-            showFailureBubble(notice)
-        case .systemNotification:
-            if await showSystemNotification(
-                title: notice.titleText,
-                body: notice.notificationBodyText,
-                identifierPrefix: "failure"
-            ) {
-                return
-            }
-            // 失败提醒不能静默丢掉，通知权限失效时继续回退到状态栏气泡。
-            showFailureBubble(notice)
-        }
+        _ = await showSystemNotification(
+            title: notice.titleText,
+            body: notice.notificationBodyText,
+            identifierPrefix: "failure"
+        )
     }
 
     private func presentWaitingNotice(_ notice: WaitingNotice) async {
-        switch store.reminderStyle {
-        case .statusBarBubble:
-            showWaitingBubble(notice)
-        case .systemNotification:
-            if await showSystemNotification(
-                title: notice.titleText,
-                body: notice.notificationBodyText,
-                identifierPrefix: "waiting"
-            ) {
-                return
-            }
-            // 确认提醒不能静默丢掉，通知权限失效时继续回退到状态栏气泡。
-            showWaitingBubble(notice)
-        }
-    }
-
-    private func showCompletionBubble(_ notice: CompletionNotice) {
-        let width = noticeBubbleWidth(
+        _ = await showSystemNotification(
             title: notice.titleText,
-            lines: [notice.bubbleMessageText, notice.durationText].compactMap { $0 }
+            body: notice.notificationBodyText,
+            identifierPrefix: "waiting"
         )
-        showNoticeBubble(
-            contentViewController: NSHostingController(rootView: CompletionNoticeView(notice: notice, width: width)),
-            size: NSSize(width: width, height: 64),
-            autoCloseAfter: 6.0
-        )
-    }
-
-    private func showFailureBubble(_ notice: FailureNotice) {
-        let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
-        showNoticeBubble(
-            contentViewController: NSHostingController(rootView: FailureNoticeView(notice: notice, width: width)),
-            size: NSSize(width: width, height: 52),
-            autoCloseAfter: 4.0
-        )
-    }
-
-    private func showWaitingBubble(_ notice: WaitingNotice) {
-        let width = noticeBubbleWidth(title: notice.titleText, lines: [notice.bubbleMessageText])
-        showNoticeBubble(
-            contentViewController: NSHostingController(rootView: WaitingNoticeView(notice: notice, width: width)),
-            size: NSSize(width: width, height: 52),
-            autoCloseAfter: 6.0
-        )
-    }
-
-    private func showNoticeBubble(contentViewController: NSViewController, size: NSSize, autoCloseAfter delay: TimeInterval) {
-        closeNoticeBubble()
-        guard let button = statusItem.button else { return }
-        noticePresentationSerial &+= 1
-        let serial = noticePresentationSerial
-
-        DispatchQueue.main.async { [weak self, weak button] in
-            guard let self, self.noticePresentationSerial == serial, let button else { return }
-            self.noticePopover.contentSize = size
-            self.noticePopover.contentViewController = contentViewController
-            // 提醒气泡退回标准 NSPopover，让系统自己处理多屏位置和越界钳制。
-            self.noticePopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            self.noticeCloseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-                Task { @MainActor in self?.closeNoticeBubble() }
-            }
-        }
-    }
-
-    private func noticeBubbleWidth(title: String, lines: [String]) -> CGFloat {
-        let titleWidth = measuredWidth(title, font: .systemFont(ofSize: 12, weight: .semibold))
-        let bodyWidth = lines
-            .map { measuredWidth($0, font: .systemFont(ofSize: 11)) }
-            .max() ?? 0
-        // 图标 18 + 图文间距 8 + 水平 padding 20，再留一点余量避免文字贴边。
-        let contentWidth = max(titleWidth, bodyWidth) + 18 + 8 + 24
-        return min(maxNoticeBubbleWidth, max(minNoticeBubbleWidth, ceil(contentWidth)))
-    }
-
-    private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: font]).width
     }
 
     private func showSystemNotification(title: String, body: String, identifierPrefix: String) async -> Bool {
@@ -584,107 +490,5 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private var nineGridCanvasSize: NSSize {
         NSSize(width: 16, height: 16)
-    }
-}
-
-struct CompletionNoticeView: View {
-    let notice: CompletionNotice
-    let width: CGFloat
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: notice.runtime.iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.green)
-                .frame(width: 18, height: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(notice.titleText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text(notice.bubbleMessageText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let durationText = notice.durationText {
-                    Text(durationText)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .frame(width: width, height: 64)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-    }
-}
-
-struct FailureNoticeView: View {
-    let notice: FailureNotice
-    let width: CGFloat
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: notice.runtime.iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.red)
-                .frame(width: 18, height: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(notice.titleText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text(notice.bubbleMessageText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .frame(width: width, height: 52)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-    }
-}
-
-struct WaitingNoticeView: View {
-    let notice: WaitingNotice
-    let width: CGFloat
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: notice.runtime.iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.yellow)
-                .frame(width: 18, height: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(notice.titleText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text(notice.bubbleMessageText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .frame(width: width, height: 52)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import UserNotifications
 
 struct PopoverContent: View {
     @ObservedObject var store: SessionStore
@@ -246,8 +247,8 @@ private struct HookHelpView: View {
 private struct HookSettingsView: View {
     @ObservedObject var store: HookSetupStore
     @ObservedObject var sessionStore: SessionStore
-    @State private var reminderMessage: String?
-    @State private var reminderErrorMessage: String?
+    @State private var notificationMessage: String?
+    @State private var notificationErrorMessage: String?
     @State private var intervalVariationText = ""
 
     var body: some View {
@@ -290,30 +291,43 @@ private struct HookSettingsView: View {
                 }
             }
 
-            settingsSection("提醒方式") {
-                Picker("提醒方式", selection: reminderStyleBinding) {
-                    ForEach(ReminderStyle.allCases) { style in
-                        Text(style.displayName).tag(style)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-
-                if let reminderErrorMessage {
-                    Text(reminderErrorMessage)
+            settingsSection("系统通知") {
+                if let notificationErrorMessage {
+                    Text(notificationErrorMessage)
                         .font(.system(size: 11))
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
-                } else if let reminderMessage {
-                    Text(reminderMessage)
+                } else if let notificationMessage {
+                    Text(notificationMessage)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text(reminderDescription)
+                    Text("任务完成、失败和等待确认都会通过 macOS 系统通知提醒。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 10) {
+                    Button("请求通知权限") {
+                        Task { @MainActor in
+                            await requestNotificationAuthorization()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("打开系统通知设置") {
+                        openSystemNotificationSettings()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("测试") {
+                        Task { @MainActor in
+                            await sendTestNotification()
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 
@@ -383,17 +397,6 @@ private struct HookSettingsView: View {
         }
     }
 
-    private var reminderStyleBinding: Binding<ReminderStyle> {
-        Binding(
-            get: { sessionStore.reminderStyle },
-            set: { newValue in
-                Task { @MainActor in
-                    await applyReminderStyle(newValue)
-                }
-            }
-        )
-    }
-
     private var nineGridAnimationIntervalBinding: Binding<Double> {
         Binding(
             get: { sessionStore.nineGridAnimationInterval },
@@ -415,15 +418,6 @@ private struct HookSettingsView: View {
         )
     }
 
-    private var reminderDescription: String {
-        switch sessionStore.reminderStyle {
-        case .statusBarBubble:
-            return "任务完成后在状态栏按钮下方显示气泡提醒。"
-        case .systemNotification:
-            return "任务完成后改用系统消息提醒；若此前拒绝过权限，需要到系统设置里重新开启。"
-        }
-    }
-
     private var nineGridAnimationDescription: String {
         "当前 \(formatInterval(sessionStore.nineGridAnimationInterval)) 秒/格，可在 \(formatInterval(SessionStore.minNineGridAnimationInterval)) 到 \(formatInterval(SessionStore.maxNineGridAnimationInterval)) 秒之间调整。"
     }
@@ -432,22 +426,66 @@ private struct HookSettingsView: View {
         "当前左右浮动 ±\(formatPercent(sessionStore.nineGridIntervalVariationPercent))%，可填 0 到 100 的数字。"
     }
 
-    private func applyReminderStyle(_ style: ReminderStyle) async {
-        reminderMessage = nil
-        reminderErrorMessage = nil
+    private func requestNotificationAuthorization() async {
+        notificationMessage = nil
+        notificationErrorMessage = nil
 
-        guard style == .systemNotification else {
-            sessionStore.setReminderStyle(.statusBarBubble)
+        // 用户明确点击后才申请系统通知权限，避免打开设置页时直接弹系统授权框。
+        if await sessionStore.requestSystemNotificationAuthorization() {
+            notificationMessage = "系统通知已开启。"
+        } else {
+            notificationErrorMessage = "系统通知未授权，请到系统设置 > 通知开启 AgentRadar。"
+        }
+    }
+
+    private func openSystemNotificationSettings() {
+        notificationMessage = nil
+        notificationErrorMessage = nil
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.long.agentradar"
+        let encodedBundleIdentifier = bundleIdentifier.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? bundleIdentifier
+        let urlTexts = [
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(encodedBundleIdentifier)",
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.notifications"
+        ]
+        for text in urlTexts {
+            guard let url = URL(string: text) else { continue }
+            // macOS 不同版本通知面板 URL 不完全一致，先尝试定位到本 App，再退回通知总页。
+            if NSWorkspace.shared.open(url) {
+                notificationMessage = "已打开系统通知设置。"
+                return
+            }
+        }
+        notificationErrorMessage = "无法打开系统通知设置。"
+    }
+
+    private func sendTestNotification() async {
+        notificationMessage = nil
+        notificationErrorMessage = nil
+
+        guard await sessionStore.canDeliverSystemNotification() else {
+            notificationErrorMessage = "系统通知未授权，请先请求权限或到系统设置开启 AgentRadar。"
             return
         }
 
-        // 切到系统消息前先申请权限，避免用户切完后实际没有任何提醒。
-        if await sessionStore.requestSystemNotificationAuthorization() {
-            sessionStore.setReminderStyle(.systemNotification)
-            reminderMessage = "系统消息已开启，任务完成后会走系统通知。"
+        let content = UNMutableNotificationContent()
+        content.title = "AgentRadar 测试提醒"
+        content.body = "这是一条系统通知示例。"
+        let request = UNNotificationRequest(
+            identifier: "test-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+
+        let delivered = await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().add(request) { error in
+                continuation.resume(returning: error == nil)
+            }
+        }
+        if delivered {
+            notificationMessage = "测试通知已发送。"
         } else {
-            sessionStore.setReminderStyle(.statusBarBubble)
-            reminderErrorMessage = "系统消息未授权，已切回状态栏气泡。请到系统设置 > 通知开启 AgentRadar。"
+            notificationErrorMessage = "测试通知发送失败。"
         }
     }
 
@@ -678,7 +716,7 @@ struct ProjectSection: View {
                 .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
                 .lineLimit(1)
-                .foregroundStyle(Color(nsColor: group.aggregateStatus.color))
+                .foregroundStyle(statusTextColor(group.aggregateStatus))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -700,15 +738,17 @@ private struct SessionTaskRow: View {
             Circle()
                 .fill(Color(nsColor: session.status.color))
                 .frame(width: 6, height: 6)
-            Text("任务 \(taskNumber)")
+            Text(session.taskName ?? "任务 \(taskNumber)")
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: 8)
             Text(session.statusLabel(now: now))
                 .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
                 .lineLimit(1)
-                .foregroundStyle(Color(nsColor: session.status.color))
+                .layoutPriority(1)
+                .foregroundStyle(statusTextColor(session.status))
         }
         .padding(.leading, 28)
         .padding(.trailing, 12)
@@ -716,4 +756,10 @@ private struct SessionTaskRow: View {
         // 子行只在同一项目有多个未结束任务时出现，计时必须跟随各自 session。
         .background(Color.secondary.opacity(0.05))
     }
+}
+
+private let idleStatusTextColor = Color(red: 191.0 / 255.0, green: 191.0 / 255.0, blue: 191.0 / 255.0)
+
+private func statusTextColor(_ status: SessionStatus) -> Color {
+    status == .idle ? idleStatusTextColor : Color(nsColor: status.color)
 }

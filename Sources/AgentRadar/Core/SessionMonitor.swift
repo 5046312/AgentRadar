@@ -11,6 +11,7 @@ final class SessionMonitor {
     private let eventScanDirectoryLimit = 40
     private let eventScanFileLimit = 20
     private let maxRestoredCodexRunningAge: TimeInterval = 30 * 60
+    private var codexThreadNameIndexSignature: String?
 
     init(store: SessionStore) {
         self.store = store
@@ -24,7 +25,11 @@ final class SessionMonitor {
             scanInitial(runtime: runtime)
         }
         idleTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.store.tickIdle() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshCodexThreadNames()
+                self.store.tickIdle()
+            }
         }
     }
 
@@ -44,6 +49,7 @@ final class SessionMonitor {
         case .claude:
             scanClaudeInitial()
         case .codex:
+            refreshCodexThreadNames(force: true)
             scanCodexInitial()
         }
     }
@@ -110,6 +116,9 @@ final class SessionMonitor {
     }
 
     private func ingestFile(_ url: URL, runtime: RuntimeKind, allowCodexCreate: Bool = false) {
+        if runtime == .codex {
+            refreshCodexThreadNames()
+        }
         let rawSessionId = rawSessionId(for: url, runtime: runtime)
         let sessionId = "\(runtime.rawValue):\(rawSessionId)"
         var projectPath = initialProjectPath(for: url, runtime: runtime)
@@ -134,7 +143,9 @@ final class SessionMonitor {
             status: .idle,
             lastActivity: Date.distantPast,
             lastEventTimestamp: Date.distantPast,
+            taskName: nil,
             activeStartedAt: nil,
+            activeTurnId: nil,
             fileURL: url,
             fileOffset: 0,
             completedFlashUntil: nil,
@@ -164,7 +175,7 @@ final class SessionMonitor {
             if runtime == .claude {
                 session.lastEventTimestamp = summary.timestamp
             } else if let event = JSONLReader.parseCodexStatusEvent(line) {
-                // Codex interrupted 场景不一定会发 Stop hook；这里用 transcript 增量把状态补齐。
+                // Codex 完成只等 Stop hook；transcript 只补齐 started / aborted 这类非完成状态。
                 applyCodexStatusEvent(event, to: &session, eventTime: summary.timestamp)
             }
             if let cwd = summary.cwd, !cwd.isEmpty {
@@ -201,8 +212,26 @@ final class SessionMonitor {
         return nil
     }
 
+    private func refreshCodexThreadNames(force: Bool = false) {
+        let url = PathUtils.codexSessionIndexFile
+        guard
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+            let modifiedAt = attributes[.modificationDate] as? Date
+        else {
+            return
+        }
+
+        let size = attributes[.size] as? UInt64 ?? 0
+        let signature = "\(modifiedAt.timeIntervalSince1970):\(size)"
+        guard force || signature != codexThreadNameIndexSignature else { return }
+
+        codexThreadNameIndexSignature = signature
+        // session_index 只负责 Codex 自动标题；任务状态仍由 hook / transcript 事件链维护。
+        store.updateCodexThreadNames(JSONLReader.readCodexThreadNames(from: url))
+    }
+
     private func normalizeRestoredCodexSession(_ session: inout Session) {
-        // 启动恢复只还原列表；“上次完成”只记录本次 App 打开后触发的完成事件。
+        // 启动恢复只还原列表；完成时间只记录本次 App 打开后触发的完成事件。
         session.lastCompletedAt = nil
         if session.status == .completed {
             // 启动恢复只还原列表，不重放历史完成闪态，否则打开菜单会短暂铺满旧完成任务。
@@ -214,9 +243,10 @@ final class SessionMonitor {
         guard session.status == .running else { return }
         let age = Date().timeIntervalSince(session.lastEventTimestamp)
         guard age > maxRestoredCodexRunningAge else { return }
-        // transcript 可能缺最后的 task_complete；旧 running 不能继续按开始时间累计成几十小时。
+        // 启动恢复不靠 task_complete 判完成；旧 running 不能继续按开始时间累计成几十小时。
         session.status = .idle
         session.activeStartedAt = nil
+        session.activeTurnId = nil
         session.lastDuration = nil
     }
 
@@ -271,32 +301,28 @@ final class SessionMonitor {
             }
             return
         }
-        // Codex 仍以 hooks 为主；这里只保留 transcript 兜底，不再额外做超时推断。
+        // Codex 完成只信 Stop hook；这里不做 transcript 完成兜底，也不做超时推断。
     }
 
     private func applyCodexStatusEvent(_ event: CodexTranscriptStatusEvent, to session: inout Session, eventTime: Date) {
         session.lastEventTimestamp = eventTime
 
         switch event {
-        case .started:
+        case .started(let turnId):
             // retry 会先把旧 turn 中断，再立刻写入新 task_started；这里必须重置起始时间。
             session.status = .running
             session.activeStartedAt = eventTime
+            session.activeTurnId = turnId
             session.lastDuration = nil
             session.lastCompletedAt = nil
             session.completedFlashUntil = nil
-        case .completed:
-            session.status = .completed
-            session.lastCompletedAt = eventTime
-            if let startedAt = session.activeStartedAt {
-                session.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
-            }
-            session.completedFlashUntil = Date().addingTimeInterval(3)
         case .interrupted:
             session.status = .idle
+            session.activeTurnId = nil
             session.completedFlashUntil = nil
         case .failed:
             session.status = .error
+            session.activeTurnId = nil
             if let startedAt = session.activeStartedAt {
                 session.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
             }

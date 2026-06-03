@@ -93,6 +93,7 @@ final class HookEventReader {
         switch event.event {
         case "Stop", "SubagentStop":
             if runtime == .codex {
+                guard shouldHandleCodexStop(event, runtime: runtime) else { return }
                 applyCodexStop(event, runtime: runtime, eventTime: eventTime)
             } else {
                 applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
@@ -131,6 +132,28 @@ final class HookEventReader {
 
         // 真实 Codex 会话会带 transcript_path；没有 transcript 的通常是 suggestions/exclude/memory 之类后台任务。
         return (event.transcript_path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
+    private func shouldHandleCodexStop(_ event: HookEvent, runtime: RuntimeKind) -> Bool {
+        guard runtime == .codex else {
+            return true
+        }
+        guard let session = hookSession(for: event, runtime: runtime), session.status == .running || session.status == .waiting else {
+            return false
+        }
+        guard let activeTurnId = session.activeTurnId, let stopTurnId = event.turn_id else {
+            // 旧 hook 载荷或 waiting 首事件可能没有 active turn，只能按当前状态兜底。
+            return true
+        }
+        // 关闭 VSCode/Codex 可能会补发旧 turn 的 Stop；只处理当前活动 turn。
+        return activeTurnId == stopTurnId
+    }
+
+    private func hookSession(for event: HookEvent, runtime: RuntimeKind) -> Session? {
+        guard let rawSessionId = rawSessionId(for: event, runtime: runtime) else {
+            return nil
+        }
+        return store.sessions["\(runtime.rawValue):\(rawSessionId)"]
     }
 
     private func shouldKeepCodexRunningForAutoReview(_ event: HookEvent, runtime: RuntimeKind) -> Bool {
@@ -172,13 +195,13 @@ final class HookEventReader {
             for attempt in 0..<6 {
                 switch JSONLReader.codexTurnOutcome(at: transcriptURL, turnId: turnId) {
                 case .completed:
-                    self.applyStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
+                    self.applyCodexStopStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
                     return
                 case .interrupted:
-                    self.applyStatus(.idle, event: event, runtime: runtime, eventTime: eventTime)
+                    self.applyCodexStopStatus(.idle, event: event, runtime: runtime, eventTime: eventTime)
                     return
                 case .failed:
-                    self.applyStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
+                    self.applyCodexStopStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
                     return
                 case .pending:
                     // Stop hook 可能比 transcript 最后一条 task_complete 更早落盘，短等几轮再判失败。
@@ -187,8 +210,14 @@ final class HookEventReader {
                     }
                 }
             }
-            self.applyStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
+            self.applyCodexStopStatus(.error, event: event, runtime: runtime, eventTime: eventTime)
         }
+    }
+
+    private func applyCodexStopStatus(_ status: SessionStatus, event: HookEvent, runtime: RuntimeKind, eventTime: Date, flashUntil: Date? = nil) {
+        // Stop 需要等 transcript 补齐结果；等待期间可能已经进入新 turn，应用前必须再核一次。
+        guard shouldHandleCodexStop(event, runtime: runtime) else { return }
+        applyStatus(status, event: event, runtime: runtime, eventTime: eventTime, flashUntil: flashUntil)
     }
 
     private func applyStatus(_ status: SessionStatus, event: HookEvent, runtime: RuntimeKind, eventTime: Date, flashUntil: Date? = nil) {
@@ -199,6 +228,7 @@ final class HookEventReader {
             eventTime: eventTime,
             cwd: event.cwd,
             transcriptPath: event.transcript_path,
+            turnId: event.turn_id,
             flashUntil: flashUntil
         )
     }

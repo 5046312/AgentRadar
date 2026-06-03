@@ -6,8 +6,7 @@ struct JSONLEntrySummary {
 }
 
 enum CodexTranscriptStatusEvent {
-    case started
-    case completed
+    case started(turnId: String?)
     case interrupted
     case failed
 }
@@ -20,6 +19,11 @@ enum CodexTurnOutcome {
 }
 
 enum JSONLReader {
+    private struct CodexSessionIndexEntry: Decodable {
+        let id: String
+        let thread_name: String?
+    }
+
     static func readNewLines(from url: URL, startingAt offset: UInt64) -> (lines: [Data], newOffset: UInt64) {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             return ([], offset)
@@ -94,6 +98,30 @@ enum JSONLReader {
         return completeLines(in: data).lines
     }
 
+    static func readCodexThreadNames(from url: URL) -> [String: String] {
+        guard
+            let text = try? String(contentsOf: url, encoding: .utf8),
+            !text.isEmpty
+        else {
+            return [:]
+        }
+
+        var result: [String: String] = [:]
+        let decoder = JSONDecoder()
+        for line in text.split(separator: "\n") {
+            guard
+                let entry = try? decoder.decode(CodexSessionIndexEntry.self, from: Data(line.utf8)),
+                let threadName = stringValue(entry.thread_name),
+                !threadName.isEmpty
+            else {
+                continue
+            }
+            // Codex 会在首次消息后写入自动标题；同一 id 若后写更新，列表展示最后一次标题。
+            result[entry.id] = threadName
+        }
+        return result
+    }
+
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
@@ -111,7 +139,7 @@ enum JSONLReader {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
         }
-        // Codex 仍以 hook 为主；这里先统一补时间和 cwd，状态兜底单独解析 event_msg。
+        // Codex 完成只由 Stop hook 触发；这里先统一补时间和 cwd，非完成状态兜底单独解析 event_msg。
         let timestamp = parseTimestamp(obj["timestamp"] as? String) ?? Date()
         let type = obj["type"] as? String
         let payload = obj["payload"] as? [String: Any]
@@ -140,9 +168,10 @@ enum JSONLReader {
 
         switch eventType {
         case "task_started":
-            return .started
+            return .started(turnId: stringValue(payload["turn_id"]))
         case "task_complete":
-            return .completed
+            // 完成状态必须只走 Stop hook，避免 transcript 补写绕过 hook 触发完成。
+            return nil
         case "turn_aborted":
             // interrupted 是用户主动 stop / retry；其余中断原因仍按失败处理。
             return (payload["reason"] as? String) == "interrupted" ? .interrupted : .failed
