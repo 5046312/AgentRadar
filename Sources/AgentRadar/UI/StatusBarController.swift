@@ -12,10 +12,32 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         case waiting
     }
 
+    private enum AmbientGridEffect: Int, CaseIterable, Equatable {
+        case shimmer
+        case glow
+        case flow
+        case marquee
+
+        var durationTicks: Int {
+            switch self {
+            case .shimmer: return Int.random(in: 28...42)
+            case .glow: return Int.random(in: 30...46)
+            case .flow: return Int.random(in: 24...36)
+            case .marquee: return Int.random(in: 32...48)
+            }
+        }
+
+        static func random(excluding current: AmbientGridEffect) -> AmbientGridEffect {
+            let candidates = allCases.filter { $0 != current }
+            return candidates.randomElement() ?? current
+        }
+    }
+
     private struct StatusRenderKey: Equatable {
         let activeCount: Int
         let aggregateStatus: String
         let hasWaitingInActiveProject: Bool
+        let ambientEffect: AmbientGridEffect
         let animationStep: Int
         let cellTones: [RunningCellTone]
     }
@@ -37,9 +59,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var activeAnimationInterval: TimeInterval?
     private var activeAnimationVariationPercent: Double?
     private var activeAnimationActiveCount = 0
+    private var activeAnimationAggregateStatus = SessionStatus.idle
     private var activeAnimationOffset = 0.0
     private var statusAnimationStep = 0
     private var statusAnimationCellTones = Array(repeating: RunningCellTone.normal, count: 9)
+    private var ambientGridEffect = AmbientGridEffect.shimmer
+    private var ambientGridEffectRemainingTicks = 0
     private var breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
     private var lastStatusRenderKey: StatusRenderKey?
     private lazy var lightRunningCellGradient = NSGradient(colors: [
@@ -58,9 +83,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         NSColor(calibratedRed: 0.01, green: 0.28, blue: 0.10, alpha: 1)
     ])
     private lazy var waitingRunningCellGradient = NSGradient(colors: [
-        NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.42, alpha: 1),
-        NSColor.systemYellow,
-        NSColor(calibratedRed: 0.82, green: 0.55, blue: 0.08, alpha: 1)
+        NSColor(calibratedRed: 1.0, green: 0.94, blue: 0.58, alpha: 0.74),
+        NSColor(calibratedRed: 1.0, green: 0.82, blue: 0.28, alpha: 0.72),
+        NSColor(calibratedRed: 0.82, green: 0.62, blue: 0.20, alpha: 0.68)
     ])
 
     init(store: SessionStore) {
@@ -184,25 +209,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private func syncStatusAnimationTimer() {
         let activeCount = store.activeCount
-        guard activeCount > 0 else {
-            statusAnimationTimer?.invalidate()
-            statusAnimationTimer = nil
-            activeAnimationInterval = nil
-            activeAnimationVariationPercent = nil
-            activeAnimationActiveCount = 0
-            activeAnimationOffset = 0
-            statusAnimationStep = 0
-            statusAnimationCellTones = Array(repeating: .normal, count: 9)
-            breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
-            return
-        }
-
+        let aggregateStatus = store.aggregateStatus
         let interval = store.nineGridAnimationInterval
         let variationPercent = store.nineGridIntervalVariationPercent
+        let wasActive = activeAnimationActiveCount > 0
+        let isActive = activeCount > 0
         let needsIntervalUpdate = activeAnimationInterval.map { abs($0 - interval) > 0.001 } ?? true
         let needsVariationUpdate = activeAnimationVariationPercent.map { abs($0 - variationPercent) > 0.001 } ?? true
         let needsActiveCountUpdate = activeAnimationActiveCount != activeCount
-        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate else {
+        let needsStatusUpdate = activeAnimationAggregateStatus != aggregateStatus
+        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate || needsStatusUpdate else {
             return
         }
 
@@ -210,28 +226,36 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         activeAnimationInterval = interval
         activeAnimationVariationPercent = variationPercent
         activeAnimationActiveCount = activeCount
-        if statusAnimationStep == 0 {
-            advanceNineGridAnimation()
+        activeAnimationAggregateStatus = aggregateStatus
+        if isActive {
+            if !wasActive || needsActiveCountUpdate || statusAnimationStep == 0 {
+                resetRunningGridAnimation()
+            }
+        } else if wasActive || needsStatusUpdate || ambientGridEffectRemainingTicks <= 0 {
+            resetAmbientGridAnimation()
         }
         scheduleNextStatusAnimationTick()
     }
 
     private func scheduleNextStatusAnimationTick() {
         statusAnimationTimer?.invalidate()
-        let randomizedInterval = clampedStatusAnimationInterval(nextBreathingAnimationInterval())
+        let randomizedInterval = clampedStatusAnimationInterval(nextStatusAnimationInterval())
         statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: randomizedInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                guard self.store.activeCount > 0 else {
-                    self.syncStatusAnimationTimer()
-                    self.renderStatusItem()
-                    return
+                if self.store.activeCount > 0 {
+                    self.advanceNineGridAnimation()
+                } else {
+                    self.advanceAmbientGridAnimation()
                 }
-                self.advanceNineGridAnimation()
                 self.renderStatusItem()
                 self.scheduleNextStatusAnimationTick()
             }
         }
+    }
+
+    private func nextStatusAnimationInterval() -> TimeInterval {
+        store.activeCount > 0 ? nextBreathingAnimationInterval() : nextAmbientGridAnimationInterval()
     }
 
     private func nextBreathingAnimationInterval() -> TimeInterval {
@@ -248,6 +272,19 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         // 多个项目同时运行时，提高亮点切换频率：2 个项目就是 2 倍速度，即间隔除以 2。
         let activeMultiplier = max(1.0, Double(activeAnimationActiveCount))
         return store.nineGridAnimationInterval * (1.0 + activeAnimationOffset) / activeMultiplier
+    }
+
+    private func nextAmbientGridAnimationInterval() -> TimeInterval {
+        breathingAnimationPhase += Double.random(in: 0.30...0.52)
+        if breathingAnimationPhase > Double.pi * 2 {
+            breathingAnimationPhase -= Double.pi * 2
+        }
+
+        let variation = store.nineGridIntervalVariationPercent / 100.0
+        let waveOffset = sin(breathingAnimationPhase) * variation * 0.45
+        let jitterOffset = Double.random(in: (-variation * 0.12)...(variation * 0.12))
+        activeAnimationOffset = waveOffset + jitterOffset
+        return store.nineGridAnimationInterval * 0.8 * (1.0 + activeAnimationOffset)
     }
 
     private func clampedStatusAnimationInterval(_ interval: TimeInterval) -> TimeInterval {
@@ -271,6 +308,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             activeCount: activeCount,
             aggregateStatus: aggregateStatus.rawValue,
             hasWaitingInActiveProject: store.hasWaitingInActiveProject,
+            ambientEffect: ambientGridEffect,
             animationStep: statusAnimationStep,
             cellTones: statusAnimationCellTones
         )
@@ -310,19 +348,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         return image
     }
 
-    private func statusColor(_ status: SessionStatus, alpha: CGFloat = 1.0) -> NSColor {
-        switch status {
-        case .running:
-            return NSColor.systemGreen.withAlphaComponent(alpha)
-        case .waiting:
-            return NSColor.systemYellow.withAlphaComponent(alpha)
-        case .error:
-            return NSColor.systemRed.withAlphaComponent(alpha)
-        case .idle, .completed:
-            return NSColor(white: 0.5, alpha: 0.35 * alpha)
-        }
-    }
-
     private func drawNineGrid(in rect: NSRect, activeCount: Int, aggregateStatus: SessionStatus) {
         let gap: CGFloat = 0.5
         let cell = (rect.width - gap * 2) / 3
@@ -353,14 +378,31 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                     ).fill()
                 }
             } else {
-                statusColor(aggregateStatus, alpha: 1.0).setFill()
-                NSBezierPath(
-                    roundedRect: cellRect,
-                    xRadius: corner,
-                    yRadius: corner
-                ).fill()
+                drawAmbientGridCell(
+                    in: cellRect,
+                    index: index,
+                    corner: corner,
+                    status: aggregateStatus
+                )
             }
         }
+    }
+
+    private func resetRunningGridAnimation() {
+        statusAnimationStep = 0
+        statusAnimationCellTones = Array(repeating: .normal, count: 9)
+        breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
+        activeAnimationOffset = 0
+        advanceNineGridAnimation()
+    }
+
+    private func resetAmbientGridAnimation() {
+        statusAnimationStep = 0
+        statusAnimationCellTones = Array(repeating: .normal, count: 9)
+        breathingAnimationPhase = Double.random(in: 0...(Double.pi * 2))
+        activeAnimationOffset = 0
+        ambientGridEffect = AmbientGridEffect.random(excluding: ambientGridEffect)
+        ambientGridEffectRemainingTicks = ambientGridEffect.durationTicks
     }
 
     private func advanceNineGridAnimation() {
@@ -372,9 +414,18 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         statusAnimationCellTones[statusAnimationStep - 1] = runningCellTone
     }
 
+    private func advanceAmbientGridAnimation() {
+        // 空闲/等待没有真实进度，靠短状态机随机切换效果，避免状态栏停成静态色块。
+        if ambientGridEffectRemainingTicks <= 0 {
+            resetAmbientGridAnimation()
+        }
+        statusAnimationStep += 1
+        ambientGridEffectRemainingTicks -= 1
+    }
+
     private func drawRunningCell(in rect: NSRect, corner: CGFloat, isNewest: Bool, tone: RunningCellTone) {
         if isNewest {
-            runningCellGlowColor(tone: tone).withAlphaComponent(0.16).setFill()
+            runningCellGlowColor(tone: tone).withAlphaComponent(runningCellGlowAlpha(tone: tone)).setFill()
             NSBezierPath(
                 roundedRect: rect.insetBy(dx: -0.6, dy: -0.6),
                 xRadius: corner + 0.6,
@@ -384,6 +435,53 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
         let path = NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner)
         runningCellGradient(tone: tone)?.draw(in: path, angle: -45)
+    }
+
+    private func drawAmbientGridCell(in rect: NSRect, index: Int, corner: CGFloat, status: SessionStatus) {
+        let path = NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner)
+        ambientGridBaseColor(status).setFill()
+        path.fill()
+
+        let alpha = ambientGridAlpha(index: index)
+        guard alpha > 0.01 else { return }
+        ambientGridGradient(status: status, alpha: alpha)?.draw(in: path, angle: -45)
+    }
+
+    private func ambientGridAlpha(index: Int) -> CGFloat {
+        let row = index / 3
+        let column = index % 3
+        let tick = Double(statusAnimationStep)
+
+        switch ambientGridEffect {
+        case .shimmer:
+            let wave = (sin(tick * 0.42 + Double(index) * 1.15) + 1.0) / 2.0
+            return CGFloat(0.10 + wave * 0.42)
+        case .glow:
+            let dx = Double(column - 1)
+            let dy = Double(row - 1)
+            let distance = sqrt(dx * dx + dy * dy)
+            let wave = (sin(tick * 0.38 - distance * 1.4) + 1.0) / 2.0
+            return CGFloat(max(0.05, wave * 0.46 - distance * 0.08))
+        case .flow:
+            let phase = statusAnimationStep % 8
+            let head = phase <= 4 ? phase : 8 - phase
+            let distance = abs((row + column) - head)
+            switch distance {
+            case 0: return 0.58
+            case 1: return 0.26
+            default: return 0.07
+            }
+        case .marquee:
+            let path = [0, 1, 2, 5, 8, 7, 6, 3]
+            guard let position = path.firstIndex(of: index) else { return 0.10 }
+            let distance = (position - statusAnimationStep % path.count + path.count) % path.count
+            switch distance {
+            case 0: return 0.62
+            case 1: return 0.32
+            case 2: return 0.16
+            default: return 0.05
+            }
+        }
     }
 
     private func statusAnimationCellTone(at index: Int) -> RunningCellTone {
@@ -425,6 +523,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func runningCellGlowAlpha(tone: RunningCellTone) -> CGFloat {
+        switch tone {
+        case .waiting:
+            return 0.08
+        case .light, .normal, .dark:
+            return 0.16
+        }
+    }
+
     private func runningCellGradient(tone: RunningCellTone) -> NSGradient? {
         switch tone {
         case .light:
@@ -438,16 +545,59 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func ambientGridBaseColor(_ status: SessionStatus) -> NSColor {
+        switch status {
+        case .waiting:
+            return NSColor(calibratedRed: 1.0, green: 0.82, blue: 0.22, alpha: 0.10)
+        case .error:
+            return NSColor.systemRed.withAlphaComponent(0.12)
+        case .completed:
+            return NSColor.systemGreen.withAlphaComponent(0.12)
+        case .running:
+            return NSColor.systemGreen.withAlphaComponent(0.12)
+        case .idle:
+            return NSColor(white: 0.5, alpha: 0.14)
+        }
+    }
+
+    private func ambientGridGradient(status: SessionStatus, alpha: CGFloat) -> NSGradient? {
+        let scaledAlpha = min(0.68, max(0.04, alpha * ambientGridAlphaScale(status)))
+        return NSGradient(colors: [
+            ambientGridBaseColor(status),
+            ambientGridHighlightColor(status).withAlphaComponent(scaledAlpha),
+            ambientGridBaseColor(status)
+        ])
+    }
+
+    private func ambientGridHighlightColor(_ status: SessionStatus) -> NSColor {
+        switch status {
+        case .waiting:
+            return NSColor(calibratedRed: 1.0, green: 0.88, blue: 0.40, alpha: 1)
+        case .error:
+            return NSColor.systemRed
+        case .completed, .running:
+            return NSColor.systemGreen
+        case .idle:
+            return NSColor(calibratedRed: 0.72, green: 0.78, blue: 0.84, alpha: 1)
+        }
+    }
+
+    private func ambientGridAlphaScale(_ status: SessionStatus) -> CGFloat {
+        switch status {
+        case .waiting:
+            return 0.54
+        case .idle, .completed, .running, .error:
+            return 1.0
+        }
+    }
+
     private var emptyCellColor: NSColor {
         NSColor(white: 0.5, alpha: 0.18)
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
-        _ = await showSystemNotification(
-            title: notice.titleText,
-            body: notice.notificationBodyText,
-            identifierPrefix: "completion"
-        )
+        // 通知横幅是否自动消失由系统设置控制；完成提醒要强制点“确定”，只能走原生 AppKit alert。
+        showCompletionAlert(notice)
     }
 
     private func presentFailureNotice(_ notice: FailureNotice) async {
@@ -486,6 +636,19 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 continuation.resume(returning: error == nil)
             }
         }
+    }
+
+    private func showCompletionAlert(_ notice: CompletionNotice) {
+        if !NSApp.isActive {
+            NSApp.activate()
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = notice.titleText
+        alert.informativeText = notice.notificationBodyText
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
     }
 
     private var nineGridCanvasSize: NSSize {
