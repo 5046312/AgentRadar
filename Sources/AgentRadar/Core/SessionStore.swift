@@ -5,29 +5,54 @@ import UserNotifications
 struct ProjectGroup: Identifiable {
     let id: String
     let name: String
-    var sessions: [Session]
+    let sessions: [Session]
+    let aggregateStatus: SessionStatus
+    let taskRows: [ProjectTaskRow]
+    private let latestCompletedAt: Date?
+    private let runningStartedAt: Date?
 
-    var aggregateStatus: SessionStatus {
-        let statuses = sessions.map(\.status)
-        if statuses.contains(.error) { return .error }
-        if statuses.contains(.waiting) { return .waiting }
-        if statuses.contains(.running) { return .running }
-        if statuses.contains(.completed) { return .completed }
-        return .idle
-    }
+    init(id: String, name: String, sessions: [Session]) {
+        self.id = id
+        self.name = name
+        self.sessions = sessions
 
-    var visibleTaskSessions: [Session] {
-        // 旧 idle 历史继续折叠；本次打开后完成的任务要保留一行，才能显示完成后的相对时间。
-        sessions.filter { $0.status != .idle || $0.lastCompletedAt != nil }
+        var aggregateStatus = SessionStatus.idle
+        var visibleTaskSessions: [Session] = []
+        var latestCompletedAt: Date?
+        var runningStartedAt: Date?
+        for session in sessions {
+            if session.status.priority < aggregateStatus.priority {
+                aggregateStatus = session.status
+            }
+            // 旧 idle 历史继续折叠；本次打开后完成的任务要保留一行，才能显示完成后的相对时间。
+            if session.status != .idle || session.lastCompletedAt != nil {
+                visibleTaskSessions.append(session)
+            }
+            if let completedAt = session.lastCompletedAt, latestCompletedAt.map({ completedAt > $0 }) ?? true {
+                latestCompletedAt = completedAt
+            }
+            if session.status == .running,
+               let startedAt = session.activeStartedAt,
+               runningStartedAt.map({ startedAt < $0 }) ?? true {
+                runningStartedAt = startedAt
+            }
+        }
+
+        self.aggregateStatus = aggregateStatus
+        self.taskRows = visibleTaskSessions.enumerated().map { offset, session in
+            ProjectTaskRow(session: session, taskNumber: offset + 1)
+        }
+        self.latestCompletedAt = latestCompletedAt
+        self.runningStartedAt = runningStartedAt
     }
 
     var shouldShowTaskRows: Bool {
-        visibleTaskSessions.count > 1
+        taskRows.count > 1
     }
 
     func statusLabel(now: Date) -> String {
         if shouldShowTaskRows {
-            return "\(visibleTaskSessions.count) 个任务"
+            return "\(taskRows.count) 个任务"
         }
         guard aggregateStatus == .running else {
             if aggregateStatus == .idle, let completedAt = latestCompletedAt {
@@ -40,19 +65,32 @@ struct ProjectGroup: Identifiable {
         }
         return "运行 \(elapsedDurationText(from: startedAt, to: now))"
     }
+}
 
-    private var latestCompletedAt: Date? {
-        sessions.compactMap(\.lastCompletedAt).max()
+struct ProjectTaskRow: Identifiable {
+    let session: Session
+    let taskNumber: Int
+
+    var id: String {
+        session.id
     }
+}
 
-    private var runningStartedAt: Date? {
-        // 只有单个未结束任务时才在项目行计时；多个任务会拆到子行各自计时。
-        sessions
-            .filter { $0.status == .running }
-            .compactMap(\.activeStartedAt)
-            .min()
+struct PopoverSessionSummary {
+    let projectGroups: [ProjectGroup]
+    let runningCounts: [RuntimeKind: Int]
+    let hasSessions: Bool
+    let hasCurrentRunCompletion: Bool
+
+    func runningCount(for runtime: RuntimeKind) -> Int {
+        runningCounts[runtime] ?? 0
     }
+}
 
+struct StatusItemSummary: Equatable {
+    let activeCount: Int
+    let aggregateStatus: SessionStatus
+    let hasWaitingInActiveProject: Bool
 }
 
 extension Session {
@@ -142,21 +180,82 @@ final class SessionStore: ObservableObject {
         sessions.values.filter { !PathUtils.isIgnoredProjectPath($0.projectPath) }
     }
 
-    func projectGroups(runtime: RuntimeKind?) -> [ProjectGroup] {
-        var groups: [String: ProjectGroup] = [:]
-        for s in trackedSessions {
-            if let runtime, s.runtime != runtime { continue }
-            if groups[s.projectPath] == nil {
-                groups[s.projectPath] = ProjectGroup(id: s.projectPath, name: s.projectName, sessions: [])
+    func popoverSummary(runtime: RuntimeKind) -> PopoverSessionSummary {
+        let currentSessions = trackedSessions
+        var runtimeSessions: [Session] = []
+        var runningCounts: [RuntimeKind: Int] = [:]
+        var hasCurrentRunCompletion = false
+
+        for session in currentSessions {
+            if session.status == .running {
+                runningCounts[session.runtime, default: 0] += 1
             }
-            groups[s.projectPath]?.sessions.append(s)
+            guard session.runtime == runtime else { continue }
+            runtimeSessions.append(session)
+            if session.lastCompletedAt != nil {
+                hasCurrentRunCompletion = true
+            }
         }
-        var result = Array(groups.values)
-        for i in result.indices {
-            result[i].sessions.sort { lhs, rhs in
-                if lhs.status.priority != rhs.status.priority { return lhs.status.priority < rhs.status.priority }
-                return lhs.lastActivity > rhs.lastActivity
+
+        return PopoverSessionSummary(
+            projectGroups: makeProjectGroups(from: runtimeSessions),
+            runningCounts: runningCounts,
+            hasSessions: !runtimeSessions.isEmpty,
+            hasCurrentRunCompletion: hasCurrentRunCompletion
+        )
+    }
+
+    func statusItemSummary() -> StatusItemSummary {
+        var activeCount = 0
+        var aggregateStatus = SessionStatus.idle
+        var activeProjectPaths = Set<String>()
+        var waitingProjectPaths = Set<String>()
+
+        for session in trackedSessions {
+            if session.status.priority < aggregateStatus.priority {
+                aggregateStatus = session.status
             }
+            if session.status == .running {
+                activeCount += 1
+                activeProjectPaths.insert(session.projectPath)
+            } else if session.status == .waiting {
+                waitingProjectPaths.insert(session.projectPath)
+            }
+        }
+
+        // 同一项目还在运行时，等待确认任务要影响后续状态栏 tick 颜色，提示用户介入。
+        let hasWaitingInActiveProject = !activeProjectPaths.isDisjoint(with: waitingProjectPaths)
+        return StatusItemSummary(
+            activeCount: activeCount,
+            aggregateStatus: aggregateStatus,
+            hasWaitingInActiveProject: hasWaitingInActiveProject
+        )
+    }
+
+    func projectGroups(runtime: RuntimeKind?) -> [ProjectGroup] {
+        let sessions = trackedSessions.filter { session in
+            guard let runtime else { return true }
+            return session.runtime == runtime
+        }
+        return makeProjectGroups(from: sessions)
+    }
+
+    private func makeProjectGroups(from sessions: [Session]) -> [ProjectGroup] {
+        var groups: [String: (name: String, sessions: [Session])] = [:]
+        for session in sessions {
+            var group = groups[session.projectPath] ?? (name: session.projectName, sessions: [])
+            group.sessions.append(session)
+            groups[session.projectPath] = group
+        }
+        var result = groups.map { projectPath, group in
+            ProjectGroup(
+                id: projectPath,
+                name: group.name,
+                sessions: group.sessions.sorted { lhs, rhs in
+                    if lhs.status.priority != rhs.status.priority { return lhs.status.priority < rhs.status.priority }
+                    return lhs.lastActivity > rhs.lastActivity
+                }
+            )
         }
         result.sort { lhs, rhs in
             if lhs.aggregateStatus.priority != rhs.aggregateStatus.priority {
@@ -170,7 +269,9 @@ final class SessionStore: ObservableObject {
     }
 
     func count(_ status: SessionStatus, runtime: RuntimeKind) -> Int {
-        trackedSessions.filter { $0.runtime == runtime && $0.status == status }.count
+        trackedSessions.reduce(0) { count, session in
+            count + (session.runtime == runtime && session.status == status ? 1 : 0)
+        }
     }
 
     func hasCurrentRunCompletion(runtime: RuntimeKind) -> Bool {
@@ -183,26 +284,16 @@ final class SessionStore: ObservableObject {
     }
 
     var aggregateStatus: SessionStatus {
-        let statuses = trackedSessions.map(\.status)
-        if statuses.contains(.error) { return .error }
-        if statuses.contains(.waiting) { return .waiting }
-        if statuses.contains(.running) { return .running }
-        if statuses.contains(where: { $0 == .completed }) { return .completed }
-        return .idle
+        statusItemSummary().aggregateStatus
     }
 
     var activeCount: Int {
         // 状态栏按钮只展示真正执行中的任务数，等待输入不算正在执行。
-        trackedSessions.filter { $0.status == .running }.count
+        statusItemSummary().activeCount
     }
 
     var hasWaitingInActiveProject: Bool {
-        let activeProjectPaths = Set(trackedSessions.filter { $0.status == .running }.map(\.projectPath))
-        guard !activeProjectPaths.isEmpty else { return false }
-        // 同一项目还在运行时，等待确认任务要影响后续状态栏 tick 颜色，提示用户介入。
-        return trackedSessions.contains { session in
-            session.status == .waiting && activeProjectPaths.contains(session.projectPath)
-        }
+        statusItemSummary().hasWaitingInActiveProject
     }
 
     func upsert(_ session: Session, notify: Bool = true) {

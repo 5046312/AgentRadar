@@ -14,15 +14,17 @@ struct PopoverContent: View {
     @State private var clockTimerInterval: TimeInterval?
 
     var body: some View {
+        let summary = store.popoverSummary(runtime: selectedRuntime)
+
         VStack(spacing: 0) {
-            header
+            header(summary: summary)
             Divider()
-            if !store.hasSessions(runtime: selectedRuntime) {
+            if !summary.hasSessions {
                 emptyView
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(store.projectGroups(runtime: selectedRuntime)) { group in
+                        ForEach(summary.projectGroups) { group in
                             ProjectSection(group: group, now: now)
                         }
                     }
@@ -35,7 +37,7 @@ struct PopoverContent: View {
         // 弹窗内操作以鼠标为主，统一关掉按钮获得焦点时的系统光环。
         .focusEffectDisabled()
         .onAppear {
-            syncClockTimer()
+            syncClockTimer(summary: summary)
         }
         .onDisappear {
             stopClockTimer()
@@ -48,7 +50,7 @@ struct PopoverContent: View {
         }
     }
 
-    private var header: some View {
+    private func header(summary: PopoverSessionSummary) -> some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 Text("AgentRadar")
@@ -83,7 +85,7 @@ struct PopoverContent: View {
 
             HStack(spacing: 6) {
                 ForEach(RuntimeKind.allCases) { runtime in
-                    runtimeTab(runtime)
+                    runtimeTab(runtime, summary: summary)
                 }
             }
         }
@@ -131,9 +133,9 @@ struct PopoverContent: View {
         .padding(.vertical, 6)
     }
 
-    private func runtimeTab(_ runtime: RuntimeKind) -> some View {
+    private func runtimeTab(_ runtime: RuntimeKind, summary: PopoverSessionSummary) -> some View {
         let selected = runtime == selectedRuntime
-        let runningCount = store.count(.running, runtime: runtime)
+        let runningCount = summary.runningCount(for: runtime)
         return Button(action: { selectedRuntime = runtime }) {
             HStack(spacing: 5) {
                 Image(systemName: runtime.iconName)
@@ -180,18 +182,22 @@ struct PopoverContent: View {
     }
 
     private func syncClockTimer() {
-        guard let interval = clockInterval else {
+        syncClockTimer(summary: store.popoverSummary(runtime: selectedRuntime))
+    }
+
+    private func syncClockTimer(summary: PopoverSessionSummary) {
+        guard let interval = clockInterval(summary: summary) else {
             stopClockTimer()
             return
         }
         startClockTimer(interval: interval)
     }
 
-    private var clockInterval: TimeInterval? {
-        if store.count(.running, runtime: selectedRuntime) > 0 {
+    private func clockInterval(summary: PopoverSessionSummary) -> TimeInterval? {
+        if summary.runningCount(for: selectedRuntime) > 0 {
             return 1.0
         }
-        if store.hasCurrentRunCompletion(runtime: selectedRuntime) {
+        if summary.hasCurrentRunCompletion {
             return 60.0
         }
         return nil
@@ -686,10 +692,10 @@ struct ProjectSection: View {
 
             if group.shouldShowTaskRows {
                 VStack(spacing: 0) {
-                    ForEach(group.visibleTaskSessions) { session in
+                    ForEach(group.taskRows) { row in
                         SessionTaskRow(
-                            session: session,
-                            taskNumber: taskNumber(for: session),
+                            session: row.session,
+                            taskNumber: row.taskNumber,
                             now: now
                         )
                     }
@@ -721,10 +727,6 @@ struct ProjectSection: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .contentShape(Rectangle())
-    }
-
-    private func taskNumber(for session: Session) -> Int {
-        (group.visibleTaskSessions.firstIndex { $0.id == session.id } ?? 0) + 1
     }
 }
 

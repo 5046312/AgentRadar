@@ -45,10 +45,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let store: SessionStore
     private let statusItem: NSStatusItem
     private let popover: NSPopover
+    private let noticePopover: NSPopover
     private let minStatusAnimationTickInterval: TimeInterval = 0.08
     private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
+    private var noticeEventMonitor: Any?
+    private var noticeResignObserver: Any?
     private var versionCancellable: AnyCancellable?
     private var speedCancellable: AnyCancellable?
     private var variationCancellable: AnyCancellable?
@@ -60,6 +63,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var activeAnimationVariationPercent: Double?
     private var activeAnimationActiveCount = 0
     private var activeAnimationAggregateStatus = SessionStatus.idle
+    private var activeAnimationHasWaitingInActiveProject = false
     private var activeAnimationOffset = 0.0
     private var statusAnimationStep = 0
     private var statusAnimationCellTones = Array(repeating: RunningCellTone.normal, count: 9)
@@ -92,6 +96,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         self.store = store
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
+        self.noticePopover = NSPopover()
         super.init()
 
         popover.behavior = .applicationDefined
@@ -99,6 +104,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 420)
         popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store))
+
+        noticePopover.behavior = .applicationDefined
+        noticePopover.animates = true
+        noticePopover.delegate = self
 
         if let button = statusItem.button {
             // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
@@ -164,6 +173,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.performClose(sender)
     }
 
+    private func closeNoticePopover(_ sender: Any?) {
+        guard noticePopover.isShown else { return }
+        noticePopover.performClose(sender)
+    }
+
     private func installPopoverCloseHandlers() {
         removePopoverCloseHandlers()
         // 系统 transient 在多屏切换时会重新绑定当前屏的状态栏按钮，关闭动画就会“飞走”。
@@ -184,6 +198,25 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func installNoticePopoverCloseHandlers() {
+        removeNoticePopoverCloseHandlers()
+        // 完成提醒也锚在状态栏按钮上；跨屏点击时先收起，避免 AppKit 重新绑定到另一块屏幕的菜单栏镜像。
+        noticeEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                self?.closeNoticePopover(nil)
+            }
+        }
+        noticeResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.closeNoticePopover(nil)
+            }
+        }
+    }
+
     private func removePopoverCloseHandlers() {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -195,21 +228,35 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func removeNoticePopoverCloseHandlers() {
+        if let noticeEventMonitor {
+            NSEvent.removeMonitor(noticeEventMonitor)
+            self.noticeEventMonitor = nil
+        }
+        if let noticeResignObserver {
+            NotificationCenter.default.removeObserver(noticeResignObserver)
+            self.noticeResignObserver = nil
+        }
+    }
+
     func popoverDidClose(_ notification: Notification) {
         guard let closedPopover = notification.object as? NSPopover else { return }
         if closedPopover === popover {
             removePopoverCloseHandlers()
+        } else if closedPopover === noticePopover {
+            removeNoticePopoverCloseHandlers()
         }
     }
 
     private func refresh() {
-        syncStatusAnimationTimer()
-        renderStatusItem()
+        let summary = store.statusItemSummary()
+        syncStatusAnimationTimer(summary: summary)
+        renderStatusItem(summary: summary)
     }
 
-    private func syncStatusAnimationTimer() {
-        let activeCount = store.activeCount
-        let aggregateStatus = store.aggregateStatus
+    private func syncStatusAnimationTimer(summary: StatusItemSummary) {
+        let activeCount = summary.activeCount
+        let aggregateStatus = summary.aggregateStatus
         let interval = store.nineGridAnimationInterval
         let variationPercent = store.nineGridIntervalVariationPercent
         let wasActive = activeAnimationActiveCount > 0
@@ -218,7 +265,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let needsVariationUpdate = activeAnimationVariationPercent.map { abs($0 - variationPercent) > 0.001 } ?? true
         let needsActiveCountUpdate = activeAnimationActiveCount != activeCount
         let needsStatusUpdate = activeAnimationAggregateStatus != aggregateStatus
-        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate || needsStatusUpdate else {
+        let needsWaitingUpdate = activeAnimationHasWaitingInActiveProject != summary.hasWaitingInActiveProject
+        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate || needsStatusUpdate || needsWaitingUpdate else {
             return
         }
 
@@ -227,8 +275,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         activeAnimationVariationPercent = variationPercent
         activeAnimationActiveCount = activeCount
         activeAnimationAggregateStatus = aggregateStatus
+        activeAnimationHasWaitingInActiveProject = summary.hasWaitingInActiveProject
         if isActive {
-            if !wasActive || needsActiveCountUpdate || statusAnimationStep == 0 {
+            if !wasActive || needsActiveCountUpdate || needsWaitingUpdate || statusAnimationStep == 0 {
                 resetRunningGridAnimation()
             }
         } else if wasActive || needsStatusUpdate || ambientGridEffectRemainingTicks <= 0 {
@@ -243,19 +292,20 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: randomizedInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.store.activeCount > 0 {
+                if self.activeAnimationActiveCount > 0 {
                     self.advanceNineGridAnimation()
                 } else {
                     self.advanceAmbientGridAnimation()
                 }
-                self.renderStatusItem()
+                let summary = self.store.statusItemSummary()
+                self.renderStatusItem(summary: summary)
                 self.scheduleNextStatusAnimationTick()
             }
         }
     }
 
     private func nextStatusAnimationInterval() -> TimeInterval {
-        store.activeCount > 0 ? nextBreathingAnimationInterval() : nextAmbientGridAnimationInterval()
+        activeAnimationActiveCount > 0 ? nextBreathingAnimationInterval() : nextAmbientGridAnimationInterval()
     }
 
     private func nextBreathingAnimationInterval() -> TimeInterval {
@@ -294,20 +344,25 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         )
     }
 
-    private func renderStatusItem() {
-        let activeCount = store.activeCount
-        let aggregateStatus = store.aggregateStatus
+    private func renderStatusItem(summary: StatusItemSummary) {
+        let activeCount = summary.activeCount
+        let aggregateStatus = summary.aggregateStatus
         guard let button = statusItem.button else { return }
         button.imagePosition = activeCount > 0 ? .imageLeading : .imageOnly
-        updateStatusImage(activeCount: activeCount, aggregateStatus: aggregateStatus, button: button)
+        updateStatusImage(
+            activeCount: activeCount,
+            aggregateStatus: aggregateStatus,
+            hasWaitingInActiveProject: summary.hasWaitingInActiveProject,
+            button: button
+        )
         updateBadgeTitle(activeCount: activeCount, button: button)
     }
 
-    private func updateStatusImage(activeCount: Int, aggregateStatus: SessionStatus, button: NSStatusBarButton) {
+    private func updateStatusImage(activeCount: Int, aggregateStatus: SessionStatus, hasWaitingInActiveProject: Bool, button: NSStatusBarButton) {
         let nextKey = StatusRenderKey(
             activeCount: activeCount,
             aggregateStatus: aggregateStatus.rawValue,
-            hasWaitingInActiveProject: store.hasWaitingInActiveProject,
+            hasWaitingInActiveProject: hasWaitingInActiveProject,
             ambientEffect: ambientGridEffect,
             animationStep: statusAnimationStep,
             cellTones: statusAnimationCellTones
@@ -492,7 +547,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private var runningCellTone: RunningCellTone {
-        if store.hasWaitingInActiveProject {
+        if activeAnimationHasWaitingInActiveProject {
             return .waiting
         }
 
@@ -596,8 +651,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func presentCompletionNotice(_ notice: CompletionNotice) async {
-        // 通知横幅是否自动消失由系统设置控制；完成提醒要强制点“确定”，只能走原生 AppKit alert。
-        showCompletionAlert(notice)
+        showCompletionNoticePopover(notice)
     }
 
     private func presentFailureNotice(_ notice: FailureNotice) async {
@@ -638,20 +692,61 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func showCompletionAlert(_ notice: CompletionNotice) {
+    private func showCompletionNoticePopover(_ notice: CompletionNotice) {
+        guard let button = statusItem.button else { return }
         if !NSApp.isActive {
             NSApp.activate()
         }
 
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = notice.titleText
-        alert.informativeText = notice.notificationBodyText
-        alert.addButton(withTitle: "确定")
-        alert.runModal()
+        if noticePopover.isShown {
+            noticePopover.performClose(nil)
+        }
+
+        noticePopover.contentSize = NSSize(width: 280, height: 150)
+        noticePopover.contentViewController = NSHostingController(
+            rootView: CompletionNoticeContent(notice: notice) { [weak self] in
+                self?.noticePopover.performClose(nil)
+            }
+        )
+
+        // 完成提醒需要用户主动确认，但位置仍复用状态栏按钮锚点，避免退回居中的 alert。
+        DispatchQueue.main.async { [weak self, weak button] in
+            guard let self, let button else { return }
+            self.noticePopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            self.installNoticePopoverCloseHandlers()
+        }
     }
 
     private var nineGridCanvasSize: NSSize {
         NSSize(width: 16, height: 16)
+    }
+}
+
+private struct CompletionNoticeContent: View {
+    let notice: CompletionNotice
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(notice.titleText)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(2)
+
+            Text(notice.notificationBodyText)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("确定") {
+                    onConfirm()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(14)
+        .frame(width: 280, alignment: .leading)
+        .focusEffectDisabled()
     }
 }
