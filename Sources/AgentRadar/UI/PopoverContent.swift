@@ -11,7 +11,6 @@ struct PopoverContent: View {
     @State private var showingSettings = false
     @State private var showingProbeTests = false
     @State private var now = Date()
-    @State private var tokenUsageSummary = TokenUsageSummary.empty
     @State private var clockTimer: Timer?
     @State private var clockTimerInterval: TimeInterval?
 
@@ -19,6 +18,7 @@ struct PopoverContent: View {
         self.store = store
         _hookSetup = StateObject(wrappedValue: HookSetupStore())
         _probeTestStore = StateObject(wrappedValue: ProbeTestStore(sessionStore: store))
+        _selectedRuntime = State(initialValue: store.defaultRuntime)
     }
 
     var body: some View {
@@ -45,19 +45,19 @@ struct PopoverContent: View {
         // 弹窗内操作以鼠标为主，统一关掉按钮获得焦点时的系统光环。
         .focusEffectDisabled()
         .onAppear {
-            syncClockTimer(summary: summary)
-            refreshTokenUsageSummary()
+            let defaultRuntime = store.defaultRuntime
+            // NSPopover 常驻复用，打开时主动应用默认 tab。
+            selectedRuntime = defaultRuntime
+            syncClockTimer(summary: store.popoverSummary(runtime: defaultRuntime))
         }
         .onDisappear {
             stopClockTimer()
         }
         .onChange(of: selectedRuntime) { _, _ in
             syncClockTimer()
-            refreshTokenUsageSummary()
         }
         .onReceive(store.$version) { _ in
             syncClockTimer()
-            refreshTokenUsageSummary()
         }
         .sheet(isPresented: $showingProbeTests) {
             ProbeTestSheet(store: probeTestStore, isPresented: $showingProbeTests)
@@ -135,8 +135,6 @@ struct PopoverContent: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            tokenUsageFooter
-
             Spacer()
 
             Button("打开 \(runtimeDirLabel)") { openRuntimeDir() }
@@ -151,26 +149,6 @@ struct PopoverContent: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-    }
-
-    private var tokenUsageFooter: some View {
-        HStack(spacing: 8) {
-            tokenUsageItem("5h", tokenUsageSummary.last5Hours)
-            tokenUsageItem("1d", tokenUsageSummary.last1Day)
-            tokenUsageItem("30d", tokenUsageSummary.last30Days)
-        }
-        .font(.system(size: 10, weight: .medium, design: .monospaced))
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .minimumScaleFactor(0.8)
-        .help("当前 \(selectedRuntime.displayName) token 用量")
-    }
-
-    private func tokenUsageItem(_ title: String, _ value: Int64) -> some View {
-        HStack(spacing: 3) {
-            Text(title)
-            Text(formatTokenCount(value))
-        }
     }
 
     private func runtimeTab(_ runtime: RuntimeKind, summary: PopoverSessionSummary) -> some View {
@@ -219,31 +197,6 @@ struct PopoverContent: View {
             url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         }
         NSWorkspace.shared.open(url)
-    }
-
-    private func refreshTokenUsageSummary() {
-        // token 统计按当前 runtime 展示，避免 Claude/Codex 混在同一组数字里。
-        tokenUsageSummary = store.tokenUsageSummary(runtime: selectedRuntime)
-    }
-
-    private func formatTokenCount(_ value: Int64) -> String {
-        if value >= 1_000_000_000 {
-            return compactTokenCount(Double(value) / 1_000_000_000, suffix: "b")
-        }
-        if value >= 1_000_000 {
-            return compactTokenCount(Double(value) / 1_000_000, suffix: "m")
-        }
-        if value >= 1_000 {
-            return compactTokenCount(Double(value) / 1_000, suffix: "k")
-        }
-        return "\(value)"
-    }
-
-    private func compactTokenCount(_ value: Double, suffix: String) -> String {
-        if value >= 10 {
-            return "\(String(format: "%.0f", value))\(suffix)"
-        }
-        return "\(String(format: "%.1f", value))\(suffix)"
     }
 
     private func syncClockTimer() {
@@ -360,6 +313,17 @@ private struct HookSettingsView: View {
                     .buttonStyle(.bordered)
                     .disabled(store.isApplying)
                 }
+            }
+
+            settingsSection("默认 Tab") {
+                Picker("", selection: defaultRuntimeBinding) {
+                    ForEach(RuntimeKind.allCases) { runtime in
+                        Text(runtime.displayName).tag(runtime)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
             }
 
             settingsSection("音效") {
@@ -515,6 +479,15 @@ private struct HookSettingsView: View {
             get: { sessionStore.soundEnabled },
             set: { enabled in
                 sessionStore.setSoundEnabled(enabled)
+            }
+        )
+    }
+
+    private var defaultRuntimeBinding: Binding<RuntimeKind> {
+        Binding(
+            get: { sessionStore.defaultRuntime },
+            set: { runtime in
+                sessionStore.setDefaultRuntime(runtime)
             }
         )
     }

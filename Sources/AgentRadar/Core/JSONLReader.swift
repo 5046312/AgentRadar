@@ -5,11 +5,6 @@ struct JSONLEntrySummary {
     let cwd: String?
 }
 
-struct TokenUsageEntry {
-    let timestamp: Date
-    let totalTokens: Int64
-}
-
 enum CodexTranscriptStatusEvent {
     case started(turnId: String?)
     case interrupted
@@ -125,11 +120,6 @@ enum JSONLReader {
             result[entry.id] = threadName
         }
         return result
-    }
-
-    static func readTokenUsageEntries(from url: URL, runtime: RuntimeKind) -> [TokenUsageEntry] {
-        let readResult = readNewLines(from: url, startingAt: 0)
-        return readResult.lines.compactMap { parseTokenUsage($0, runtime: runtime) }
     }
 
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
@@ -257,97 +247,6 @@ enum JSONLReader {
             }
         }
         return false
-    }
-
-    private static func parseTokenUsage(_ data: Data, runtime: RuntimeKind) -> TokenUsageEntry? {
-        switch runtime {
-        case .claude:
-            return parseClaudeTokenUsage(data)
-        case .codex:
-            return parseCodexTokenUsage(data)
-        }
-    }
-
-    private static func parseClaudeTokenUsage(_ data: Data) -> TokenUsageEntry? {
-        guard
-            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-            obj["type"] as? String == "assistant",
-            let message = obj["message"] as? [String: Any],
-            let usage = message["usage"] as? [String: Any],
-            let timestamp = parseTimestamp(obj["timestamp"] as? String)
-        else {
-            return nil
-        }
-
-        let total = totalTokens(
-            in: usage,
-            keys: [
-                "input_tokens",
-                "output_tokens",
-                "cache_creation_input_tokens",
-                "cache_read_input_tokens"
-            ]
-        )
-        guard total > 0 else { return nil }
-        return TokenUsageEntry(timestamp: timestamp, totalTokens: total)
-    }
-
-    private static func parseCodexTokenUsage(_ data: Data) -> TokenUsageEntry? {
-        guard
-            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-            obj["type"] as? String == "event_msg",
-            let payload = obj["payload"] as? [String: Any],
-            payload["type"] as? String == "token_count",
-            let info = payload["info"] as? [String: Any],
-            let usage = info["last_token_usage"] as? [String: Any]
-        else {
-            return nil
-        }
-
-        let total = tokenTotal(from: usage)
-        guard total > 0 else { return nil }
-        let timestamp = parseCodexTimestamp(
-            type: obj["type"] as? String,
-            payload: payload,
-            fallback: obj["timestamp"] as? String
-        ) ?? Date()
-        return TokenUsageEntry(timestamp: timestamp, totalTokens: total)
-    }
-
-    private static func tokenTotal(from usage: [String: Any]) -> Int64 {
-        if let total = int64Value(usage["total_tokens"]) {
-            return total
-        }
-        return totalTokens(
-            in: usage,
-            keys: [
-                "input_tokens",
-                "output_tokens",
-                "cached_input_tokens",
-                "reasoning_output_tokens"
-            ]
-        )
-    }
-
-    private static func totalTokens(in usage: [String: Any], keys: [String]) -> Int64 {
-        keys.reduce(Int64(0)) { total, key in
-            total + (int64Value(usage[key]) ?? 0)
-        }
-    }
-
-    private static func int64Value(_ value: Any?) -> Int64? {
-        switch value {
-        case let value as Int:
-            return Int64(value)
-        case let value as Int64:
-            return value
-        case let value as Double:
-            return Int64(value)
-        case let value as NSNumber:
-            return value.int64Value
-        default:
-            return nil
-        }
     }
 
     private static func completeLines(in data: Data) -> (lines: [Data], lastNewline: Int) {

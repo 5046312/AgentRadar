@@ -96,19 +96,6 @@ struct PopoverSessionSummary {
     }
 }
 
-struct TokenUsageSummary: Equatable {
-    let last5Hours: Int64
-    let last1Day: Int64
-    let last30Days: Int64
-
-    static let empty = TokenUsageSummary(last5Hours: 0, last1Day: 0, last30Days: 0)
-}
-
-private struct TokenUsageCacheEntry {
-    let summary: TokenUsageSummary
-    let refreshedAt: Date
-}
-
 struct StatusItemSummary: Equatable {
     let activeCount: Int
     let aggregateStatus: SessionStatus
@@ -173,6 +160,7 @@ final class SessionStore: ObservableObject {
         static let systemNotificationEnabled = "systemNotificationEnabled"
         static let completionConfirmationEnabled = "completionConfirmationEnabled"
         static let errorConfirmationEnabled = "errorConfirmationEnabled"
+        static let defaultRuntime = "defaultRuntime"
         static let nineGridAnimationInterval = "nineGridAnimationInterval"
         static let nineGridIntervalVariationPercent = "nineGridIntervalVariationPercent"
     }
@@ -200,6 +188,7 @@ final class SessionStore: ObservableObject {
         forKey: DefaultsKey.errorConfirmationEnabled,
         fallback: true
     )
+    @Published var defaultRuntime: RuntimeKind = SessionStore.loadDefaultRuntime()
     @Published var nineGridAnimationInterval: Double = SessionStore.clampedNineGridAnimationInterval(SessionStore.loadDouble(
         forKey: DefaultsKey.nineGridAnimationInterval,
         fallback: SessionStore.defaultNineGridAnimationInterval
@@ -209,8 +198,6 @@ final class SessionStore: ObservableObject {
         fallback: SessionStore.defaultNineGridIntervalVariationPercent
     ))
     private var codexThreadNames: [String: String] = [:]
-    private var tokenUsageCache: [RuntimeKind: TokenUsageCacheEntry] = [:]
-    private let tokenUsageCacheDuration: TimeInterval = 30
 
     private var trackedSessions: [Session] {
         // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
@@ -277,17 +264,6 @@ final class SessionStore: ObservableObject {
         return makeProjectGroups(from: sessions)
     }
 
-    func tokenUsageSummary(runtime: RuntimeKind, now: Date = Date()) -> TokenUsageSummary {
-        if let cache = tokenUsageCache[runtime],
-           now.timeIntervalSince(cache.refreshedAt) < tokenUsageCacheDuration {
-            return cache.summary
-        }
-
-        let summary = makeTokenUsageSummary(runtime: runtime, now: now)
-        tokenUsageCache[runtime] = TokenUsageCacheEntry(summary: summary, refreshedAt: now)
-        return summary
-    }
-
     private func makeProjectGroups(from sessions: [Session]) -> [ProjectGroup] {
         var groups: [String: (name: String, sessions: [Session])] = [:]
         for session in sessions {
@@ -312,54 +288,6 @@ final class SessionStore: ObservableObject {
             let lhsLatest = lhs.sessions.first?.lastActivity ?? .distantPast
             let rhsLatest = rhs.sessions.first?.lastActivity ?? .distantPast
             return lhsLatest > rhsLatest
-        }
-        return result
-    }
-
-    private func makeTokenUsageSummary(runtime: RuntimeKind, now: Date) -> TokenUsageSummary {
-        let fiveHoursAgo = now.addingTimeInterval(-5 * 60 * 60)
-        let oneDayAgo = now.addingTimeInterval(-24 * 60 * 60)
-        let thirtyDaysAgo = now.addingTimeInterval(-30 * 24 * 60 * 60)
-        var last5Hours: Int64 = 0
-        var last1Day: Int64 = 0
-        var last30Days: Int64 = 0
-
-        for url in tokenUsageCandidateFiles(runtime: runtime, since: thirtyDaysAgo) {
-            for entry in JSONLReader.readTokenUsageEntries(from: url, runtime: runtime) {
-                guard entry.timestamp >= thirtyDaysAgo, entry.timestamp <= now else { continue }
-                last30Days += entry.totalTokens
-                if entry.timestamp >= oneDayAgo {
-                    last1Day += entry.totalTokens
-                }
-                if entry.timestamp >= fiveHoursAgo {
-                    last5Hours += entry.totalTokens
-                }
-            }
-        }
-
-        return TokenUsageSummary(
-            last5Hours: last5Hours,
-            last1Day: last1Day,
-            last30Days: last30Days
-        )
-    }
-
-    private func tokenUsageCandidateFiles(runtime: RuntimeKind, since cutoff: Date) -> [URL] {
-        let root = PathUtils.sessionsDir(for: runtime)
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        var result: [URL] = []
-        for case let url as URL in enumerator {
-            guard url.pathExtension == "jsonl" else { continue }
-            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-            guard (values?.contentModificationDate ?? .distantPast) >= cutoff else { continue }
-            result.append(url)
         }
         return result
     }
@@ -669,6 +597,11 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: DefaultsKey.errorConfirmationEnabled)
     }
 
+    func setDefaultRuntime(_ runtime: RuntimeKind) {
+        defaultRuntime = runtime
+        UserDefaults.standard.set(runtime.rawValue, forKey: DefaultsKey.defaultRuntime)
+    }
+
     func setNineGridAnimationInterval(_ value: Double) {
         let nextValue = SessionStore.clampedNineGridAnimationInterval(value)
         nineGridAnimationInterval = nextValue
@@ -789,6 +722,13 @@ final class SessionStore: ObservableObject {
     nonisolated private static func loadBool(forKey key: String, fallback: Bool) -> Bool {
         guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
         return UserDefaults.standard.bool(forKey: key)
+    }
+
+    nonisolated private static func loadDefaultRuntime() -> RuntimeKind {
+        guard let rawValue = UserDefaults.standard.string(forKey: DefaultsKey.defaultRuntime) else {
+            return .claude
+        }
+        return RuntimeKind(rawValue: rawValue) ?? .claude
     }
 
     nonisolated private static func clampedNineGridAnimationInterval(_ value: Double) -> Double {
