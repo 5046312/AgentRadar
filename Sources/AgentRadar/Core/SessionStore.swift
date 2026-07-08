@@ -10,6 +10,7 @@ struct ProjectGroup: Identifiable {
     let taskRows: [ProjectTaskRow]
     private let latestCompletedAt: Date?
     private let runningStartedAt: Date?
+    private let runningTaskCount: Int
 
     init(id: String, name: String, sessions: [Session]) {
         self.id = id
@@ -20,6 +21,7 @@ struct ProjectGroup: Identifiable {
         var visibleTaskSessions: [Session] = []
         var latestCompletedAt: Date?
         var runningStartedAt: Date?
+        var runningTaskCount = 0
         for session in sessions {
             if session.status.priority < aggregateStatus.priority {
                 aggregateStatus = session.status
@@ -36,6 +38,9 @@ struct ProjectGroup: Identifiable {
                runningStartedAt.map({ startedAt < $0 }) ?? true {
                 runningStartedAt = startedAt
             }
+            if session.status == .running {
+                runningTaskCount += 1
+            }
         }
 
         self.aggregateStatus = aggregateStatus
@@ -44,14 +49,18 @@ struct ProjectGroup: Identifiable {
         }
         self.latestCompletedAt = latestCompletedAt
         self.runningStartedAt = runningStartedAt
+        self.runningTaskCount = runningTaskCount
     }
 
     var shouldShowTaskRows: Bool {
-        taskRows.count > 1
+        runningTaskCount > 0 || taskRows.count > 1
     }
 
     func statusLabel(now: Date) -> String {
         if shouldShowTaskRows {
+            if runningTaskCount > 0 {
+                return "\(runningTaskCount) 个运行中"
+            }
             return "\(taskRows.count) 个任务"
         }
         guard aggregateStatus == .running else {
@@ -85,6 +94,19 @@ struct PopoverSessionSummary {
     func runningCount(for runtime: RuntimeKind) -> Int {
         runningCounts[runtime] ?? 0
     }
+}
+
+struct TokenUsageSummary: Equatable {
+    let last5Hours: Int64
+    let last1Day: Int64
+    let last30Days: Int64
+
+    static let empty = TokenUsageSummary(last5Hours: 0, last1Day: 0, last30Days: 0)
+}
+
+private struct TokenUsageCacheEntry {
+    let summary: TokenUsageSummary
+    let refreshedAt: Date
 }
 
 struct StatusItemSummary: Equatable {
@@ -148,6 +170,9 @@ private func relativePastText(from date: Date, to now: Date) -> String {
 final class SessionStore: ObservableObject {
     private enum DefaultsKey {
         static let soundEnabled = "soundEnabled"
+        static let systemNotificationEnabled = "systemNotificationEnabled"
+        static let completionConfirmationEnabled = "completionConfirmationEnabled"
+        static let errorConfirmationEnabled = "errorConfirmationEnabled"
         static let nineGridAnimationInterval = "nineGridAnimationInterval"
         static let nineGridIntervalVariationPercent = "nineGridIntervalVariationPercent"
     }
@@ -164,7 +189,17 @@ final class SessionStore: ObservableObject {
     @Published private(set) var latestCompletion: CompletionNotice?
     @Published private(set) var latestFailure: FailureNotice?
     @Published private(set) var latestWaiting: WaitingNotice?
+    @Published private(set) var latestProbeSuccess: ProbeSuccessNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
+    @Published var systemNotificationEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.systemNotificationEnabled)
+    @Published var completionConfirmationEnabled: Bool = SessionStore.loadBool(
+        forKey: DefaultsKey.completionConfirmationEnabled,
+        fallback: true
+    )
+    @Published var errorConfirmationEnabled: Bool = SessionStore.loadBool(
+        forKey: DefaultsKey.errorConfirmationEnabled,
+        fallback: true
+    )
     @Published var nineGridAnimationInterval: Double = SessionStore.clampedNineGridAnimationInterval(SessionStore.loadDouble(
         forKey: DefaultsKey.nineGridAnimationInterval,
         fallback: SessionStore.defaultNineGridAnimationInterval
@@ -174,6 +209,8 @@ final class SessionStore: ObservableObject {
         fallback: SessionStore.defaultNineGridIntervalVariationPercent
     ))
     private var codexThreadNames: [String: String] = [:]
+    private var tokenUsageCache: [RuntimeKind: TokenUsageCacheEntry] = [:]
+    private let tokenUsageCacheDuration: TimeInterval = 30
 
     private var trackedSessions: [Session] {
         // `~/.codex/memories` 是代理内部工作目录，不应显示成用户项目，也不应影响状态栏计数。
@@ -240,6 +277,17 @@ final class SessionStore: ObservableObject {
         return makeProjectGroups(from: sessions)
     }
 
+    func tokenUsageSummary(runtime: RuntimeKind, now: Date = Date()) -> TokenUsageSummary {
+        if let cache = tokenUsageCache[runtime],
+           now.timeIntervalSince(cache.refreshedAt) < tokenUsageCacheDuration {
+            return cache.summary
+        }
+
+        let summary = makeTokenUsageSummary(runtime: runtime, now: now)
+        tokenUsageCache[runtime] = TokenUsageCacheEntry(summary: summary, refreshedAt: now)
+        return summary
+    }
+
     private func makeProjectGroups(from sessions: [Session]) -> [ProjectGroup] {
         var groups: [String: (name: String, sessions: [Session])] = [:]
         for session in sessions {
@@ -264,6 +312,54 @@ final class SessionStore: ObservableObject {
             let lhsLatest = lhs.sessions.first?.lastActivity ?? .distantPast
             let rhsLatest = rhs.sessions.first?.lastActivity ?? .distantPast
             return lhsLatest > rhsLatest
+        }
+        return result
+    }
+
+    private func makeTokenUsageSummary(runtime: RuntimeKind, now: Date) -> TokenUsageSummary {
+        let fiveHoursAgo = now.addingTimeInterval(-5 * 60 * 60)
+        let oneDayAgo = now.addingTimeInterval(-24 * 60 * 60)
+        let thirtyDaysAgo = now.addingTimeInterval(-30 * 24 * 60 * 60)
+        var last5Hours: Int64 = 0
+        var last1Day: Int64 = 0
+        var last30Days: Int64 = 0
+
+        for url in tokenUsageCandidateFiles(runtime: runtime, since: thirtyDaysAgo) {
+            for entry in JSONLReader.readTokenUsageEntries(from: url, runtime: runtime) {
+                guard entry.timestamp >= thirtyDaysAgo, entry.timestamp <= now else { continue }
+                last30Days += entry.totalTokens
+                if entry.timestamp >= oneDayAgo {
+                    last1Day += entry.totalTokens
+                }
+                if entry.timestamp >= fiveHoursAgo {
+                    last5Hours += entry.totalTokens
+                }
+            }
+        }
+
+        return TokenUsageSummary(
+            last5Hours: last5Hours,
+            last1Day: last1Day,
+            last30Days: last30Days
+        )
+    }
+
+    private func tokenUsageCandidateFiles(runtime: RuntimeKind, since cutoff: Date) -> [URL] {
+        let root = PathUtils.sessionsDir(for: runtime)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var result: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "jsonl" else { continue }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            guard (values?.contentModificationDate ?? .distantPast) >= cutoff else { continue }
+            result.append(url)
         }
         return result
     }
@@ -296,6 +392,22 @@ final class SessionStore: ObservableObject {
         statusItemSummary().hasWaitingInActiveProject
     }
 
+    func resetAllSessionsToIdle() {
+        var changed = false
+        for (id, var session) in sessions {
+            guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { continue }
+            // 手动重置只修正 App 内存状态，不改 transcript 文件；用于异常卡在运行中时快速恢复显示。
+            session.status = .idle
+            session.activeStartedAt = nil
+            session.activeTurnId = nil
+            session.completedFlashUntil = nil
+            session.lastCompletedAt = nil
+            sessions[id] = session
+            changed = true
+        }
+        if changed { version &+= 1 }
+    }
+
     func upsert(_ session: Session, notify: Bool = true) {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
         var nextSession = session
@@ -305,6 +417,9 @@ final class SessionStore: ObservableObject {
         version &+= 1
         if notify, nextSession.status == .completed && oldStatus != .completed {
             publishCompletion(nextSession)
+        }
+        if notify, nextSession.status == .error && oldStatus != .error {
+            publishFailure(nextSession)
         }
     }
 
@@ -342,6 +457,12 @@ final class SessionStore: ObservableObject {
             if let turnId {
                 s.activeTurnId = turnId
             }
+        }
+        if status == .idle {
+            // 用户取消应立即回到纯空闲态，不保留旧 turn 字段继续影响顶部计数和任务行。
+            s.activeStartedAt = nil
+            s.lastCompletedAt = nil
+            s.completedFlashUntil = nil
         }
         if (status == .completed || status == .error), oldStatus != status, let startedAt = s.activeStartedAt {
             s.lastDuration = max(0, eventTime.timeIntervalSince(startedAt))
@@ -516,7 +637,7 @@ final class SessionStore: ObservableObject {
         }
 
         // 完成提醒仍只靠 Stop hook；这里仅处理窗口已关、Stop 未被 App 读到时的 stale running。
-        switch JSONLReader.codexTurnOutcome(at: session.fileURL, turnId: turnId) {
+        switch JSONLReader.codexTurnOutcome(at: session.fileURL, turnId: turnId, startedAt: session.activeStartedAt) {
         case .completed, .interrupted, .failed:
             return true
         case .pending:
@@ -525,8 +646,27 @@ final class SessionStore: ObservableObject {
     }
 
     func toggleSound() {
-        soundEnabled.toggle()
-        UserDefaults.standard.set(soundEnabled, forKey: DefaultsKey.soundEnabled)
+        setSoundEnabled(!soundEnabled)
+    }
+
+    func setSoundEnabled(_ enabled: Bool) {
+        soundEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: DefaultsKey.soundEnabled)
+    }
+
+    func setSystemNotificationEnabled(_ enabled: Bool) {
+        systemNotificationEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: DefaultsKey.systemNotificationEnabled)
+    }
+
+    func setCompletionConfirmationEnabled(_ enabled: Bool) {
+        completionConfirmationEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: DefaultsKey.completionConfirmationEnabled)
+    }
+
+    func setErrorConfirmationEnabled(_ enabled: Bool) {
+        errorConfirmationEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: DefaultsKey.errorConfirmationEnabled)
     }
 
     func setNineGridAnimationInterval(_ value: Double) {
@@ -558,6 +698,7 @@ final class SessionStore: ObservableObject {
     }
 
     func canDeliverSystemNotification() async -> Bool {
+        guard systemNotificationEnabled else { return false }
         let settings = await loadNotificationSettings(UNUserNotificationCenter.current())
         switch settings.authorizationStatus {
         case .authorized, .provisional:
@@ -567,6 +708,28 @@ final class SessionStore: ObservableObject {
         @unknown default:
             return false
         }
+    }
+
+    func publishTestCompletionNotice() {
+        // 测试按钮只发布同一种完成事件；真实弹窗仍由 StatusBarController 统一定位和展示。
+        latestCompletion = CompletionNotice(
+            projectName: "AgentRadar",
+            taskName: "测试提醒",
+            duration: nil
+        )
+    }
+
+    func publishTestFailureNotice() {
+        // 测试按钮只发布同一种失败事件；真实错误动画和弹窗仍由 StatusBarController 统一处理。
+        latestFailure = FailureNotice(projectName: "AgentRadar")
+    }
+
+    func publishProbeSuccessNotice(baseURL: String, model: String) {
+        let host = URL(string: baseURL)?.host ?? baseURL
+        latestProbeSuccess = ProbeSuccessNotice(
+            title: "接口测试成功",
+            body: "\(host)\n模型：\(model)"
+        )
     }
 
     private func playCompletionSound() {
@@ -592,7 +755,13 @@ final class SessionStore: ObservableObject {
 
     private func publishCompletion(_ session: Session) {
         // 完成提示和音效共用同一次状态跃迁，避免 JSONL 补写内容时重复弹出。
-        latestCompletion = CompletionNotice(session: session)
+        var noticeSession = session
+        if noticeSession.runtime == .codex {
+            // Codex 自动标题来自 session_index.jsonl；Stop 可能先于 2 秒轮询到达，完成前主动补读一次。
+            refreshCodexThreadNamesFromIndex()
+            applyCodexThreadName(to: &noticeSession)
+        }
+        latestCompletion = CompletionNotice(session: noticeSession)
         playCompletionSound()
     }
 
@@ -606,9 +775,20 @@ final class SessionStore: ObservableObject {
         latestWaiting = WaitingNotice(session: session)
     }
 
+    private func refreshCodexThreadNamesFromIndex() {
+        let names = JSONLReader.readCodexThreadNames(from: PathUtils.codexSessionIndexFile)
+        guard !names.isEmpty else { return }
+        codexThreadNames = names
+    }
+
     nonisolated private static func loadDouble(forKey key: String, fallback: Double) -> Double {
         guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
         return UserDefaults.standard.double(forKey: key)
+    }
+
+    nonisolated private static func loadBool(forKey key: String, fallback: Bool) -> Bool {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     nonisolated private static func clampedNineGridAnimationInterval(_ value: Double) -> Double {

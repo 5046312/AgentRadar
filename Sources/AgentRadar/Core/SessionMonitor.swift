@@ -322,7 +322,10 @@ final class SessionMonitor {
             session.completedFlashUntil = nil
         case .interrupted:
             session.status = .idle
+            // transcript 旁路不经过 SessionStore.setStatus；取消时也要清掉活动字段，避免旧运行态残留。
+            session.activeStartedAt = nil
             session.activeTurnId = nil
+            session.lastCompletedAt = nil
             session.completedFlashUntil = nil
         case .failed:
             session.status = .error

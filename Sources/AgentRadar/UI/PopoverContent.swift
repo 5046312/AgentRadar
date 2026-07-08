@@ -1,17 +1,25 @@
 import Foundation
 import SwiftUI
 import AppKit
-import UserNotifications
 
 struct PopoverContent: View {
     @ObservedObject var store: SessionStore
-    @StateObject private var hookSetup = HookSetupStore()
+    @StateObject private var hookSetup: HookSetupStore
+    @StateObject private var probeTestStore: ProbeTestStore
     @State private var selectedRuntime: RuntimeKind = .claude
     @State private var showingHelp = false
     @State private var showingSettings = false
+    @State private var showingProbeTests = false
     @State private var now = Date()
+    @State private var tokenUsageSummary = TokenUsageSummary.empty
     @State private var clockTimer: Timer?
     @State private var clockTimerInterval: TimeInterval?
+
+    init(store: SessionStore) {
+        self.store = store
+        _hookSetup = StateObject(wrappedValue: HookSetupStore())
+        _probeTestStore = StateObject(wrappedValue: ProbeTestStore(sessionStore: store))
+    }
 
     var body: some View {
         let summary = store.popoverSummary(runtime: selectedRuntime)
@@ -38,15 +46,21 @@ struct PopoverContent: View {
         .focusEffectDisabled()
         .onAppear {
             syncClockTimer(summary: summary)
+            refreshTokenUsageSummary()
         }
         .onDisappear {
             stopClockTimer()
         }
         .onChange(of: selectedRuntime) { _, _ in
             syncClockTimer()
+            refreshTokenUsageSummary()
         }
         .onReceive(store.$version) { _ in
             syncClockTimer()
+            refreshTokenUsageSummary()
+        }
+        .sheet(isPresented: $showingProbeTests) {
+            ProbeTestSheet(store: probeTestStore, isPresented: $showingProbeTests)
         }
     }
 
@@ -70,6 +84,13 @@ struct PopoverContent: View {
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
                     HookSettingsView(store: hookSetup, sessionStore: store)
                 }
+                Button(action: { showingProbeTests = true }) {
+                    Image(systemName: "testtube.2")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("测试")
                 Button(action: { showingHelp = true }) {
                     Image(systemName: "questionmark.circle")
                         .font(.system(size: 12, weight: .semibold))
@@ -81,6 +102,13 @@ struct PopoverContent: View {
                     HookHelpView()
                 }
                 Spacer()
+                Button(action: { store.resetAllSessionsToIdle() }) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("重置所有任务为空闲")
             }
 
             HStack(spacing: 6) {
@@ -107,15 +135,7 @@ struct PopoverContent: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Button(action: { store.toggleSound() }) {
-                HStack(spacing: 4) {
-                    Image(systemName: store.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                    Text(store.soundEnabled ? "音效开" : "音效关")
-                }
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11))
-            .foregroundStyle(store.soundEnabled ? .primary : .secondary)
+            tokenUsageFooter
 
             Spacer()
 
@@ -131,6 +151,26 @@ struct PopoverContent: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    private var tokenUsageFooter: some View {
+        HStack(spacing: 8) {
+            tokenUsageItem("5h", tokenUsageSummary.last5Hours)
+            tokenUsageItem("1d", tokenUsageSummary.last1Day)
+            tokenUsageItem("30d", tokenUsageSummary.last30Days)
+        }
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .help("当前 \(selectedRuntime.displayName) token 用量")
+    }
+
+    private func tokenUsageItem(_ title: String, _ value: Int64) -> some View {
+        HStack(spacing: 3) {
+            Text(title)
+            Text(formatTokenCount(value))
+        }
     }
 
     private func runtimeTab(_ runtime: RuntimeKind, summary: PopoverSessionSummary) -> some View {
@@ -179,6 +219,31 @@ struct PopoverContent: View {
             url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         }
         NSWorkspace.shared.open(url)
+    }
+
+    private func refreshTokenUsageSummary() {
+        // token 统计按当前 runtime 展示，避免 Claude/Codex 混在同一组数字里。
+        tokenUsageSummary = store.tokenUsageSummary(runtime: selectedRuntime)
+    }
+
+    private func formatTokenCount(_ value: Int64) -> String {
+        if value >= 1_000_000_000 {
+            return compactTokenCount(Double(value) / 1_000_000_000, suffix: "b")
+        }
+        if value >= 1_000_000 {
+            return compactTokenCount(Double(value) / 1_000_000, suffix: "m")
+        }
+        if value >= 1_000 {
+            return compactTokenCount(Double(value) / 1_000, suffix: "k")
+        }
+        return "\(value)"
+    }
+
+    private func compactTokenCount(_ value: Double, suffix: String) -> String {
+        if value >= 10 {
+            return "\(String(format: "%.0f", value))\(suffix)"
+        }
+        return "\(String(format: "%.1f", value))\(suffix)"
     }
 
     private func syncClockTimer() {
@@ -297,43 +362,64 @@ private struct HookSettingsView: View {
                 }
             }
 
-            settingsSection("系统通知") {
-                if let notificationErrorMessage {
-                    Text(notificationErrorMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if let notificationMessage {
-                    Text(notificationMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("任务完成、失败和等待确认都会通过 macOS 系统通知提醒。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            settingsSection("音效") {
+                Toggle("任务完成音效", isOn: soundEnabledBinding)
+                    .font(.system(size: 11))
+                    .controlSize(.small)
+            }
 
-                HStack(spacing: 10) {
-                    Button("请求通知权限") {
-                        Task { @MainActor in
-                            await requestNotificationAuthorization()
-                        }
+            settingsSection("系统提示") {
+                Toggle("", isOn: systemNotificationEnabledBinding)
+                    .labelsHidden()
+                    .controlSize(.small)
+            } content: {
+                if sessionStore.systemNotificationEnabled {
+                    if let notificationErrorMessage {
+                        Text(notificationErrorMessage)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let notificationMessage {
+                        Text(notificationMessage)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("开启后可分别设置任务完成和错误时是否使用系统原生确认弹窗。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .buttonStyle(.borderedProminent)
+
+                    Toggle("完成后显示确认按钮", isOn: completionConfirmationEnabledBinding)
+                        .font(.system(size: 11))
+                        .controlSize(.small)
+
+                    Toggle("错误时显示确认按钮", isOn: errorConfirmationEnabledBinding)
+                        .font(.system(size: 11))
+                        .controlSize(.small)
+
+                    HStack(spacing: 10) {
+                        Button("测试完成") {
+                            sendTestCompletionNotice()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("测试失败") {
+                            sendTestFailureNotice()
+                        }
+                        .buttonStyle(.bordered)
+                    }
 
                     Button("打开系统通知设置") {
                         openSystemNotificationSettings()
                     }
                     .buttonStyle(.bordered)
-
-                    Button("测试") {
-                        Task { @MainActor in
-                            await sendTestNotification()
-                        }
-                    }
-                    .buttonStyle(.bordered)
+                } else {
+                    Text("关闭后，任务完成、错误和等待确认都不会弹出系统提示。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -424,6 +510,48 @@ private struct HookSettingsView: View {
         )
     }
 
+    private var soundEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { sessionStore.soundEnabled },
+            set: { enabled in
+                sessionStore.setSoundEnabled(enabled)
+            }
+        )
+    }
+
+    private var systemNotificationEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { sessionStore.systemNotificationEnabled },
+            set: { enabled in
+                notificationMessage = nil
+                notificationErrorMessage = nil
+                sessionStore.setSystemNotificationEnabled(enabled)
+                guard enabled else { return }
+                Task { @MainActor in
+                    await requestNotificationAuthorization()
+                }
+            }
+        )
+    }
+
+    private var completionConfirmationEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { sessionStore.completionConfirmationEnabled },
+            set: { enabled in
+                sessionStore.setCompletionConfirmationEnabled(enabled)
+            }
+        )
+    }
+
+    private var errorConfirmationEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { sessionStore.errorConfirmationEnabled },
+            set: { enabled in
+                sessionStore.setErrorConfirmationEnabled(enabled)
+            }
+        )
+    }
+
     private var nineGridAnimationDescription: String {
         "当前 \(formatInterval(sessionStore.nineGridAnimationInterval)) 秒/格，可在 \(formatInterval(SessionStore.minNineGridAnimationInterval)) 到 \(formatInterval(SessionStore.maxNineGridAnimationInterval)) 秒之间调整。"
     }
@@ -436,7 +564,7 @@ private struct HookSettingsView: View {
         notificationMessage = nil
         notificationErrorMessage = nil
 
-        // 用户明确点击后才申请系统通知权限，避免打开设置页时直接弹系统授权框。
+        // 用户明确打开开关后才申请系统通知权限，避免打开设置页时直接弹系统授权框。
         if await sessionStore.requestSystemNotificationAuthorization() {
             notificationMessage = "系统通知已开启。"
         } else {
@@ -465,40 +593,43 @@ private struct HookSettingsView: View {
         notificationErrorMessage = "无法打开系统通知设置。"
     }
 
-    private func sendTestNotification() async {
+    private func sendTestCompletionNotice() {
         notificationMessage = nil
         notificationErrorMessage = nil
+        sessionStore.publishTestCompletionNotice()
+        notificationMessage = "任务完成测试已触发。"
+    }
 
-        guard await sessionStore.canDeliverSystemNotification() else {
-            notificationErrorMessage = "系统通知未授权，请先请求权限或到系统设置开启 AgentRadar。"
-            return
-        }
-
-        let content = UNMutableNotificationContent()
-        content.title = "AgentRadar 测试提醒"
-        content.body = "这是一条系统通知示例。"
-        let request = UNNotificationRequest(
-            identifier: "test-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-
-        let delivered = await withCheckedContinuation { continuation in
-            UNUserNotificationCenter.current().add(request) { error in
-                continuation.resume(returning: error == nil)
-            }
-        }
-        if delivered {
-            notificationMessage = "测试通知已发送。"
-        } else {
-            notificationErrorMessage = "测试通知发送失败。"
-        }
+    private func sendTestFailureNotice() {
+        notificationMessage = nil
+        notificationErrorMessage = nil
+        sessionStore.publishTestFailureNotice()
+        notificationMessage = "任务失败测试已触发。"
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func settingsSection<Trailing: View, Content: View>(
+        _ title: String,
+        @ViewBuilder trailing: () -> Trailing,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                trailing()
+            }
             content()
         }
         .padding(10)

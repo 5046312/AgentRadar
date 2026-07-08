@@ -13,7 +13,9 @@ if [[ ! -f "$ICON_SRC" ]]; then
     echo "missing $ICON_SRC" >&2
     exit 1
 fi
-ICONSET="$(mktemp -d)/AppIcon.iconset"
+ICON_WORK_DIR="$(mktemp -d)"
+ICONSET="$ICON_WORK_DIR/AppIcon.iconset"
+ICON_TMP_OUT="$ICON_WORK_DIR/AppIcon.icns"
 mkdir -p "$ICONSET"
 sips -z 16 16     "$ICON_SRC" --out "$ICONSET/icon_16x16.png"      >/dev/null
 sips -z 32 32     "$ICON_SRC" --out "$ICONSET/icon_16x16@2x.png"   >/dev/null
@@ -25,9 +27,16 @@ sips -z 256 256   "$ICON_SRC" --out "$ICONSET/icon_256x256.png"    >/dev/null
 sips -z 512 512   "$ICON_SRC" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
 sips -z 512 512   "$ICON_SRC" --out "$ICONSET/icon_512x512.png"    >/dev/null
 cp "$ICON_SRC" "$ICONSET/icon_512x512@2x.png"
-rm -f "$ICON_OUT"
-iconutil -c icns "$ICONSET" -o "$ICON_OUT"
-rm -rf "$(dirname "$ICONSET")"
+if iconutil -c icns "$ICONSET" -o "$ICON_TMP_OUT"; then
+    mv "$ICON_TMP_OUT" "$ICON_OUT"
+elif [[ -f "$ICON_OUT" ]]; then
+    # iconutil 在部分系统上会误判 iconset，已有 icns 时保留旧图标继续打包。
+    echo "warning: failed to regenerate $ICON_OUT, reusing existing file" >&2
+else
+    rm -rf "$ICON_WORK_DIR"
+    exit 1
+fi
+rm -rf "$ICON_WORK_DIR"
 
 echo "[2/5] swift build -c release"
 swift build -c release

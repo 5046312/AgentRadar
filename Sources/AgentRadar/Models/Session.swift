@@ -50,17 +50,31 @@ struct Session: Identifiable, Equatable {
 struct CompletionNotice: Identifiable, Equatable {
     let id = UUID()
     let projectName: String
+    let taskName: String?
     let duration: TimeInterval?
 
+    init(projectName: String, taskName: String?, duration: TimeInterval?) {
+        self.projectName = projectName
+        self.taskName = taskName
+        self.duration = duration
+    }
+
     init(session: Session) {
-        projectName = session.projectName
-        duration = session.lastDuration
+        self.init(
+            projectName: session.projectName,
+            taskName: session.taskName,
+            duration: session.lastDuration
+        )
     }
 }
 
 struct FailureNotice: Identifiable, Equatable {
     let id = UUID()
     let projectName: String
+
+    init(projectName: String) {
+        self.projectName = projectName
+    }
 
     init(session: Session) {
         projectName = session.projectName
@@ -76,13 +90,22 @@ struct WaitingNotice: Identifiable, Equatable {
     }
 }
 
+struct ProbeSuccessNotice: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let body: String
+}
+
 extension CompletionNotice {
     var titleText: String {
         projectName
     }
 
     var messageText: String {
-        "任务完成，请及时审阅"
+        guard let taskName, !taskName.isEmpty else {
+            return "任务完成，请及时审阅"
+        }
+        return "\(taskName)，任务完成，请及时审阅"
     }
 
     var notificationBodyText: String {

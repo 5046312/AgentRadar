@@ -5,6 +5,11 @@ struct JSONLEntrySummary {
     let cwd: String?
 }
 
+struct TokenUsageEntry {
+    let timestamp: Date
+    let totalTokens: Int64
+}
+
 enum CodexTranscriptStatusEvent {
     case started(turnId: String?)
     case interrupted
@@ -122,6 +127,11 @@ enum JSONLReader {
         return result
     }
 
+    static func readTokenUsageEntries(from url: URL, runtime: RuntimeKind) -> [TokenUsageEntry] {
+        let readResult = readNewLines(from: url, startingAt: 0)
+        return readResult.lines.compactMap { parseTokenUsage($0, runtime: runtime) }
+    }
+
     static func parseSummary(_ data: Data) -> JSONLEntrySummary? {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             return nil
@@ -174,35 +184,63 @@ enum JSONLReader {
             return nil
         case "turn_aborted":
             // interrupted 是用户主动 stop / retry；其余中断原因仍按失败处理。
-            return (payload["reason"] as? String) == "interrupted" ? .interrupted : .failed
+            return isUserCancellationReason(payload["reason"]) ? .interrupted : .failed
         default:
             return nil
         }
     }
 
-    static func codexTurnOutcome(at url: URL, turnId: String) -> CodexTurnOutcome {
+    static func codexTurnOutcome(at url: URL, turnId: String, startedAt: Date? = nil) -> CodexTurnOutcome {
         let readResult = readNewLines(from: url, startingAt: 0)
         guard !readResult.lines.isEmpty else {
             return .pending
         }
 
+        var isInReviewMode = false
+        var didSeeRequestedTurnStart = false
+        var requestedTurnAllowsMismatchedTerminal = false
         for line in readResult.lines {
             guard
                 let obj = try? JSONSerialization.jsonObject(with: line, options: []) as? [String: Any],
                 obj["type"] as? String == "event_msg",
                 let payload = obj["payload"] as? [String: Any],
-                payload["turn_id"] as? String == turnId,
                 let eventType = payload["type"] as? String
             else {
                 continue
             }
 
+            let eventTurnId = payload["turn_id"] as? String
             switch eventType {
+            case "entered_review_mode":
+                isInReviewMode = true
+            case "exited_review_mode":
+                isInReviewMode = false
+            case "task_started":
+                if eventTurnId == turnId {
+                    didSeeRequestedTurnStart = true
+                    requestedTurnAllowsMismatchedTerminal = isInReviewMode
+                    continue
+                }
+                if didSeeRequestedTurnStart {
+                    return .pending
+                }
             case "task_complete":
-                return .completed
+                if eventTurnId == turnId {
+                    return .completed
+                }
+                // Review 模式会把完成事件写成另一个 turn_id；普通任务仍必须精确匹配，避免误收真正运行中的任务。
+                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt) {
+                    return .completed
+                }
             case "turn_aborted":
                 // interrupted 是用户主动打断；其他终止原因都按失败处理。
-                return (payload["reason"] as? String) == "interrupted" ? .interrupted : .failed
+                let outcome: CodexTurnOutcome = isUserCancellationReason(payload["reason"]) ? .interrupted : .failed
+                if eventTurnId == turnId {
+                    return outcome
+                }
+                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt) {
+                    return outcome
+                }
             default:
                 continue
             }
@@ -219,6 +257,97 @@ enum JSONLReader {
             }
         }
         return false
+    }
+
+    private static func parseTokenUsage(_ data: Data, runtime: RuntimeKind) -> TokenUsageEntry? {
+        switch runtime {
+        case .claude:
+            return parseClaudeTokenUsage(data)
+        case .codex:
+            return parseCodexTokenUsage(data)
+        }
+    }
+
+    private static func parseClaudeTokenUsage(_ data: Data) -> TokenUsageEntry? {
+        guard
+            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            obj["type"] as? String == "assistant",
+            let message = obj["message"] as? [String: Any],
+            let usage = message["usage"] as? [String: Any],
+            let timestamp = parseTimestamp(obj["timestamp"] as? String)
+        else {
+            return nil
+        }
+
+        let total = totalTokens(
+            in: usage,
+            keys: [
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens"
+            ]
+        )
+        guard total > 0 else { return nil }
+        return TokenUsageEntry(timestamp: timestamp, totalTokens: total)
+    }
+
+    private static func parseCodexTokenUsage(_ data: Data) -> TokenUsageEntry? {
+        guard
+            let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            obj["type"] as? String == "event_msg",
+            let payload = obj["payload"] as? [String: Any],
+            payload["type"] as? String == "token_count",
+            let info = payload["info"] as? [String: Any],
+            let usage = info["last_token_usage"] as? [String: Any]
+        else {
+            return nil
+        }
+
+        let total = tokenTotal(from: usage)
+        guard total > 0 else { return nil }
+        let timestamp = parseCodexTimestamp(
+            type: obj["type"] as? String,
+            payload: payload,
+            fallback: obj["timestamp"] as? String
+        ) ?? Date()
+        return TokenUsageEntry(timestamp: timestamp, totalTokens: total)
+    }
+
+    private static func tokenTotal(from usage: [String: Any]) -> Int64 {
+        if let total = int64Value(usage["total_tokens"]) {
+            return total
+        }
+        return totalTokens(
+            in: usage,
+            keys: [
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+                "reasoning_output_tokens"
+            ]
+        )
+    }
+
+    private static func totalTokens(in usage: [String: Any], keys: [String]) -> Int64 {
+        keys.reduce(Int64(0)) { total, key in
+            total + (int64Value(usage[key]) ?? 0)
+        }
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64? {
+        switch value {
+        case let value as Int:
+            return Int64(value)
+        case let value as Int64:
+            return value
+        case let value as Double:
+            return Int64(value)
+        case let value as NSNumber:
+            return value.int64Value
+        default:
+            return nil
+        }
     }
 
     private static func completeLines(in data: Data) -> (lines: [Data], lastNewline: Int) {
@@ -269,6 +398,16 @@ enum JSONLReader {
         (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func isUserCancellationReason(_ value: Any?) -> Bool {
+        guard let reason = stringValue(value)?.lowercased(), !reason.isEmpty else {
+            return false
+        }
+        // Codex 不同版本的取消 reason 文案不完全一致；只收敛用户取消/中断，不吞真正失败。
+        return reason == "interrupted"
+            || reason.contains("cancel")
+            || reason.contains("interrupt")
+    }
+
     private static func parseTimestamp(_ s: String?) -> Date? {
         guard let s = s else { return nil }
         if let d = fractionalTimestampFormatter.date(from: s) { return d }
@@ -298,6 +437,14 @@ enum JSONLReader {
             return Date(timeIntervalSince1970: TimeInterval(value))
         }
         return nil
+    }
+
+    private static func isTerminalEventValidForRequestedTurn(payload: [String: Any], startedAt: Date?) -> Bool {
+        guard let startedAt else { return true }
+        guard let completedAt = unixTimestamp(payload["completed_at"]) else {
+            return false
+        }
+        return completedAt >= startedAt
     }
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {
