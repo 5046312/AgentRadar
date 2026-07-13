@@ -59,12 +59,15 @@ struct ProbeTestSheet: View {
 
                 TableColumn("操作") { row in
                     HStack(spacing: 8) {
-                        Button("停止") {
-                            store.stopConfig(id: row.id)
+                        Button(row.isRunning ? "停止" : "开始") {
+                            if row.isRunning {
+                                store.stopConfig(id: row.id)
+                            } else {
+                                store.startConfig(id: row.id)
+                            }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .disabled(!row.isRunning)
 
                         Button("删除") {
                             store.deleteConfig(id: row.id)
@@ -115,6 +118,13 @@ private struct ProbeStatusHistoryButton: View {
 private struct ProbeStatusHistoryPopover: View {
     let entries: [ProbeTestHistoryEntry]
 
+    private static let timestampFormatter: DateFormatter = {
+        // 历史列表会频繁重绘，复用 formatter 避免每行重复创建。
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("最近 10 条")
@@ -146,9 +156,7 @@ private struct ProbeStatusHistoryPopover: View {
     }
 
     private func historyTimestamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+        Self.timestampFormatter.string(from: date)
     }
 }
 
@@ -158,7 +166,7 @@ private struct ProbeTestAddSheet: View {
     @State private var protocolType: ProbeTestProtocol = .openAI
     @State private var baseURL = ""
     @State private var apiKey = ""
-    @State private var intervalText = "0.1"
+    @State private var intervalText = "1"
     @State private var models: [String] = []
     @State private var selectedModel = ""
     @State private var isLoadingModels = false
@@ -240,7 +248,7 @@ private struct ProbeTestAddSheet: View {
                 }
 
                 formRow("测试间隔秒") {
-                    AppKitTextInput(text: $intervalText, placeholder: "0.1")
+                    AppKitTextInput(text: $intervalText, placeholder: "1")
                         .frame(width: 120, alignment: .leading)
                         .frame(height: 24)
                 }
@@ -276,7 +284,7 @@ private struct ProbeTestAddSheet: View {
     }
 
     private var canSave: Bool {
-        guard let interval = Double(intervalText), interval >= 0.1 else { return false }
+        guard let interval = Double(intervalText), interval >= 1 else { return false }
         return !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !selectedModel.isEmpty
@@ -301,19 +309,23 @@ private struct ProbeTestAddSheet: View {
     }
 
     private func save() {
-        guard let interval = Double(intervalText), interval >= 0.1 else {
-            errorMessage = "测试间隔最小 0.1 秒。"
+        guard let interval = Double(intervalText), interval >= 1 else {
+            errorMessage = "测试间隔最小 1 秒。"
             return
         }
 
-        store.addConfig(
-            protocolType: protocolType,
-            baseURL: baseURL,
-            apiKey: apiKey,
-            model: selectedModel,
-            intervalSeconds: interval
-        )
-        dismiss()
+        do {
+            try store.addConfig(
+                protocolType: protocolType,
+                baseURL: baseURL,
+                apiKey: apiKey,
+                model: selectedModel,
+                intervalSeconds: interval
+            )
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func formRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

@@ -122,6 +122,43 @@ final class HookSetupStore: ObservableObject {
     }
 }
 
+enum HookEventStorage {
+    private static let maxFileBytes: off_t = 4 * 1024 * 1024
+
+    static func prepare() throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: PathUtils.hookEventsDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: PathUtils.hookEventsDirectory.path)
+
+        if !fileManager.fileExists(atPath: PathUtils.hookEventsFile.path) {
+            let created = fileManager.createFile(
+                atPath: PathUtils.hookEventsFile.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
+            guard created else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+            }
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: PathUtils.hookEventsFile.path)
+    }
+
+    static func truncateIfNeeded(fileDescriptor: Int32) throws {
+        var fileInfo = stat()
+        guard fstat(fileDescriptor, &fileInfo) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard fileInfo.st_size >= maxFileBytes else { return }
+        guard ftruncate(fileDescriptor, 0) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+}
+
 enum HookConfigurationManager {
     static var currentExecutablePath: String {
         // App 内安装时要写入当前可执行文件路径，CLI 模式则退回到命令本身。
@@ -202,17 +239,40 @@ enum HookConfigurationManager {
 
     static func apply(plan: HookInstallPlan) throws {
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: PathUtils.hookEventsDirectory, withIntermediateDirectories: true, attributes: nil)
-        try fileManager.createDirectory(at: PathUtils.claudeSettingsFile.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
-        try fileManager.createDirectory(at: PathUtils.codexDirectory, withIntermediateDirectories: true, attributes: nil)
-
         for change in plan.changes {
-            try fileManager.createDirectory(at: change.url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
-            try change.updatedText.write(to: change.url, atomically: true, encoding: .utf8)
+            let currentText = try loadTextIfExists(at: change.url)
+            guard currentText == change.currentText else {
+                throw NSError(domain: "HookConfigurationManager", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "\(change.displayPath) 在预览后已变化，请重新生成 diff。"
+                ])
+            }
         }
 
-        if plan.createsEventsFile && !fileManager.fileExists(atPath: PathUtils.hookEventsFile.path) {
-            _ = fileManager.createFile(atPath: PathUtils.hookEventsFile.path, contents: nil)
+        let createdEventsFile = !fileManager.fileExists(atPath: PathUtils.hookEventsFile.path)
+        var appliedChanges: [HookFileChange] = []
+        do {
+            try HookEventStorage.prepare()
+            try fileManager.createDirectory(at: PathUtils.claudeSettingsFile.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            try fileManager.createDirectory(at: PathUtils.codexDirectory, withIntermediateDirectories: true, attributes: nil)
+
+            for change in plan.changes {
+                try fileManager.createDirectory(at: change.url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+                try change.updatedText.write(to: change.url, atomically: true, encoding: .utf8)
+                appliedChanges.append(change)
+            }
+        } catch {
+            // 多文件安装中途失败时恢复本轮已写内容，避免留下半安装状态。
+            for change in appliedChanges.reversed() {
+                if let currentText = change.currentText {
+                    try? currentText.write(to: change.url, atomically: true, encoding: .utf8)
+                } else if fileManager.fileExists(atPath: change.url.path) {
+                    try? fileManager.removeItem(at: change.url)
+                }
+            }
+            if createdEventsFile, fileManager.fileExists(atPath: PathUtils.hookEventsFile.path) {
+                try? fileManager.removeItem(at: PathUtils.hookEventsFile)
+            }
+            throw error
         }
     }
 
@@ -312,7 +372,7 @@ enum HookConfigurationManager {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private static func codexHooksEnabled(in configText: String?) -> Bool {
+    static func codexHooksEnabled(in configText: String?) -> Bool {
         guard let configText else {
             return false
         }
@@ -327,7 +387,7 @@ enum HookConfigurationManager {
                 isInFeaturesSection = line == "[features]"
                 continue
             }
-            guard isInFeaturesSection, line.hasPrefix("hooks") else {
+            guard isInFeaturesSection, tomlAssignmentKey(in: line) == "hooks" else {
                 continue
             }
             let parts = line.split(separator: "=", maxSplits: 1)
@@ -340,7 +400,7 @@ enum HookConfigurationManager {
         return false
     }
 
-    private static func updatedCodexConfigText(from existingText: String?) -> String {
+    static func updatedCodexConfigText(from existingText: String?) -> String {
         var lines = (existingText ?? "").components(separatedBy: .newlines)
         if lines.count == 1, lines[0].isEmpty {
             lines.removeAll()
@@ -365,7 +425,7 @@ enum HookConfigurationManager {
         if let featuresHeaderIndex {
             for index in (featuresHeaderIndex + 1)..<nextSectionIndex {
                 let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("hooks") {
+                if tomlAssignmentKey(in: trimmed) == "hooks" {
                     lines[index] = "hooks = true"
                     return lines.joined(separator: "\n")
                 }
@@ -381,6 +441,12 @@ enum HookConfigurationManager {
         lines.append("[features]")
         lines.append("hooks = true")
         return lines.joined(separator: "\n")
+    }
+
+    private static func tomlAssignmentKey(in line: String) -> String? {
+        guard let separator = line.firstIndex(of: "=") else { return nil }
+        let key = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
+        return key.isEmpty ? nil : key
     }
 
     private static func plannedCodexConfigChange() throws -> HookFileChange? {
@@ -633,6 +699,14 @@ enum HookCommandRouter {
 }
 
 enum HookEventRecorder {
+    private static let persistedInputKeys = [
+        "session_id",
+        "cwd",
+        "turn_id",
+        "transcript_path",
+        "approvals_reviewer"
+    ]
+
     static func record(runtimeName: String, event: String) throws {
         let input = FileHandle.standardInput.readDataToEndOfFile()
         var payload: [String: Any] = [:]
@@ -642,18 +716,19 @@ enum HookEventRecorder {
             let rawObject = try? JSONSerialization.jsonObject(with: input),
             let object = rawObject as? [String: Any]
         {
-            payload = object
+            // Hook 输入可能包含工具参数，只保留状态识别实际需要的字段。
+            for key in persistedInputKeys {
+                if let value = object[key] {
+                    payload[key] = value
+                }
+            }
         }
 
         payload["runtime"] = runtimeName
         payload["event"] = event
         payload["ts"] = Date().timeIntervalSince1970
 
-        // hooks 的原始载荷按行落盘，后续统一由 HookEventReader 消费。
-        try FileManager.default.createDirectory(at: PathUtils.hookEventsDirectory, withIntermediateDirectories: true, attributes: nil)
-        if !FileManager.default.fileExists(atPath: PathUtils.hookEventsFile.path) {
-            _ = FileManager.default.createFile(atPath: PathUtils.hookEventsFile.path, contents: nil)
-        }
+        try HookEventStorage.prepare()
 
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         var line = data
@@ -661,7 +736,7 @@ enum HookEventRecorder {
 
         // Codex/Claude hooks 可能并发触发；这里必须把“整行 JSON + 换行”作为一个临界区写入，
         // 否则 events.jsonl 会出现两条记录互相拼接，HookEventReader 就会直接解码失败。
-        let fd = open(PathUtils.hookEventsFile.path, O_WRONLY | O_APPEND)
+        let fd = open(PathUtils.hookEventsFile.path, O_WRONLY | O_APPEND | O_CLOEXEC)
         guard fd >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
@@ -671,6 +746,8 @@ enum HookEventRecorder {
         }
         defer { flock(fd, LOCK_UN) }
 
+        // 旧事件不会在 App 重启后重放，限制文件大小可减少敏感数据留存和无效磁盘增长。
+        try HookEventStorage.truncateIfNeeded(fileDescriptor: fd)
         try writeAll(line, to: fd)
     }
 
@@ -681,7 +758,11 @@ enum HookEventRecorder {
             while written < rawBuffer.count {
                 let result = write(fd, baseAddress.advanced(by: written), rawBuffer.count - written)
                 if result < 0 {
+                    if errno == EINTR { continue }
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                guard result > 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
                 }
                 written += result
             }

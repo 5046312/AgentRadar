@@ -250,7 +250,7 @@ private struct HookHelpView: View {
             helpRow("安装 hooks", "点齿轮按钮会先预览 diff，确认后再写入；重启当前 Claude/Codex 会话后才生效。")
             helpRow("Codex 状态", "Codex 的运行、等待输入、完成状态来自 hooks，不再靠 session 文件增长猜测。")
             helpRow("首次信任", "Codex 下次启动可能要求 Review hooks，选择信任后状态才会写入。")
-            helpRow("事件文件", "所有事件写入 ~/.agentradar/events.jsonl，AgentRadar 只读本机文件。")
+            helpRow("事件文件", "状态识别需要的字段写入 ~/.agentradar/events.jsonl，文件仅限当前用户读取。")
         }
         .padding(14)
         .frame(width: 300, alignment: .leading)

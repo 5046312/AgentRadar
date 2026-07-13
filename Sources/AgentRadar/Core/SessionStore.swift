@@ -102,6 +102,13 @@ struct StatusItemSummary: Equatable {
     let hasWaitingInActiveProject: Bool
 }
 
+struct CodexSettlementCandidate: Sendable {
+    let sessionId: String
+    let fileURL: URL
+    let turnId: String
+    let startedAt: Date?
+}
+
 extension Session {
     func statusLabel(now: Date) -> String {
         if status == .idle, let lastCompletedAt {
@@ -340,7 +347,9 @@ final class SessionStore: ObservableObject {
         guard !PathUtils.isIgnoredProjectPath(session.projectPath) else { return }
         var nextSession = session
         applyCodexThreadName(to: &nextSession)
-        let oldStatus = sessions[nextSession.id]?.status
+        let previousSession = sessions[nextSession.id]
+        guard previousSession != nextSession else { return }
+        let oldStatus = previousSession?.status
         sessions[nextSession.id] = nextSession
         version &+= 1
         if notify, nextSession.status == .completed && oldStatus != .completed {
@@ -522,10 +531,30 @@ final class SessionStore: ObservableObject {
         return size
     }
 
-    func tickIdle(now: Date = Date()) {
+    func codexSettlementCandidates(now: Date = Date()) -> [CodexSettlementCandidate] {
+        sessions.values.compactMap { session in
+            guard
+                session.status == .running,
+                session.runtime == .codex,
+                let turnId = session.activeTurnId,
+                session.fileURL.pathExtension == "jsonl",
+                now.timeIntervalSince(session.lastActivity) > 5
+            else {
+                return nil
+            }
+            return CodexSettlementCandidate(
+                sessionId: session.id,
+                fileURL: session.fileURL,
+                turnId: turnId,
+                startedAt: session.activeStartedAt
+            )
+        }
+    }
+
+    func tickIdle(now: Date = Date(), settledCodexTurns: [String: String] = [:]) {
         var changed = false
         for (id, var s) in sessions {
-            if s.status == .running, s.runtime == .codex, shouldSettleCodexSession(s, now: now) {
+            if s.status == .running, s.runtime == .codex, settledCodexTurns[id] == s.activeTurnId {
                 s.status = .idle
                 s.activeTurnId = nil
                 if let startedAt = s.activeStartedAt {
@@ -553,24 +582,6 @@ final class SessionStore: ObservableObject {
             }
         }
         if changed { version &+= 1 }
-    }
-
-    private func shouldSettleCodexSession(_ session: Session, now: Date) -> Bool {
-        guard
-            let turnId = session.activeTurnId,
-            session.fileURL.pathExtension == "jsonl",
-            now.timeIntervalSince(session.lastActivity) > 5
-        else {
-            return false
-        }
-
-        // 完成提醒仍只靠 Stop hook；这里仅处理窗口已关、Stop 未被 App 读到时的 stale running。
-        switch JSONLReader.codexTurnOutcome(at: session.fileURL, turnId: turnId, startedAt: session.activeStartedAt) {
-        case .completed, .interrupted, .failed:
-            return true
-        case .pending:
-            return false
-        }
     }
 
     func toggleSound() {

@@ -11,7 +11,7 @@ enum CodexTranscriptStatusEvent {
     case failed
 }
 
-enum CodexTurnOutcome {
+enum CodexTurnOutcome: Equatable {
     case completed
     case interrupted
     case failed
@@ -19,6 +19,13 @@ enum CodexTurnOutcome {
 }
 
 enum JSONLReader {
+    private struct CodexTurnOutcomeScan {
+        let outcome: CodexTurnOutcome
+        let needsFullScan: Bool
+    }
+
+    private static let codexOutcomeTailBytes: UInt64 = 2 * 1024 * 1024
+
     private struct CodexSessionIndexEntry: Decodable {
         let id: String
         let thread_name: String?
@@ -78,12 +85,15 @@ enum JSONLReader {
             return ([], fileSize)
         }
 
-        var lines = completeLines(in: data).lines
+        let completeResult = completeLines(in: data)
+        var lines = completeResult.lines
         if shouldDropFirstLine, !lines.isEmpty {
             // 尾读可能从一行中间开始，丢掉半截 JSON，避免启动阶段解码失败刷无效工作。
             lines.removeFirst()
         }
-        return (lines, fileSize)
+        // 最后一行可能仍在写入，offset 必须停在最后一个完整换行后，避免永久漏掉半行 JSON。
+        let consumed = max(0, completeResult.lastNewline + 1)
+        return (lines, startOffset + UInt64(consumed))
     }
 
     static func readInitialLines(from url: URL, maxBytes: UInt64) -> [Data] {
@@ -181,15 +191,34 @@ enum JSONLReader {
     }
 
     static func codexTurnOutcome(at url: URL, turnId: String, startedAt: Date? = nil) -> CodexTurnOutcome {
-        let readResult = readNewLines(from: url, startingAt: 0)
-        guard !readResult.lines.isEmpty else {
+        let recentLines = readRecentLines(from: url, maxBytes: codexOutcomeTailBytes).lines
+        let recentScan = scanCodexTurnOutcome(in: recentLines, turnId: turnId, startedAt: startedAt)
+        guard recentScan.outcome == .pending else {
+            return recentScan.outcome
+        }
+
+        guard
+            recentScan.needsFullScan,
+            (fileSize(at: url) ?? 0) > codexOutcomeTailBytes
+        else {
             return .pending
+        }
+
+        // Review 模式可能使用不同 turn_id；仅遇到相关终止事件时退回全量扫描。
+        let fullLines = readNewLines(from: url, startingAt: 0).lines
+        return scanCodexTurnOutcome(in: fullLines, turnId: turnId, startedAt: startedAt).outcome
+    }
+
+    private static func scanCodexTurnOutcome(in lines: [Data], turnId: String, startedAt: Date?) -> CodexTurnOutcomeScan {
+        guard !lines.isEmpty else {
+            return CodexTurnOutcomeScan(outcome: .pending, needsFullScan: false)
         }
 
         var isInReviewMode = false
         var didSeeRequestedTurnStart = false
         var requestedTurnAllowsMismatchedTerminal = false
-        for line in readResult.lines {
+        var sawRelevantMismatchedTerminal = false
+        for line in lines {
             guard
                 let obj = try? JSONSerialization.jsonObject(with: line, options: []) as? [String: Any],
                 obj["type"] as? String == "event_msg",
@@ -212,31 +241,35 @@ enum JSONLReader {
                     continue
                 }
                 if didSeeRequestedTurnStart {
-                    return .pending
+                    return CodexTurnOutcomeScan(outcome: .pending, needsFullScan: false)
                 }
             case "task_complete":
                 if eventTurnId == turnId {
-                    return .completed
+                    return CodexTurnOutcomeScan(outcome: .completed, needsFullScan: false)
                 }
                 // Review 模式会把完成事件写成另一个 turn_id；普通任务仍必须精确匹配，避免误收真正运行中的任务。
-                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt) {
-                    return .completed
+                let isRelevantTerminal = isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt)
+                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isRelevantTerminal {
+                    return CodexTurnOutcomeScan(outcome: .completed, needsFullScan: false)
                 }
+                sawRelevantMismatchedTerminal = sawRelevantMismatchedTerminal || isRelevantTerminal
             case "turn_aborted":
                 // interrupted 是用户主动打断；其他终止原因都按失败处理。
                 let outcome: CodexTurnOutcome = isUserCancellationReason(payload["reason"]) ? .interrupted : .failed
                 if eventTurnId == turnId {
-                    return outcome
+                    return CodexTurnOutcomeScan(outcome: outcome, needsFullScan: false)
                 }
-                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt) {
-                    return outcome
+                let isRelevantTerminal = isTerminalEventValidForRequestedTurn(payload: payload, startedAt: startedAt)
+                if didSeeRequestedTurnStart && requestedTurnAllowsMismatchedTerminal && isRelevantTerminal {
+                    return CodexTurnOutcomeScan(outcome: outcome, needsFullScan: false)
                 }
+                sawRelevantMismatchedTerminal = sawRelevantMismatchedTerminal || isRelevantTerminal
             default:
                 continue
             }
         }
 
-        return .pending
+        return CodexTurnOutcomeScan(outcome: .pending, needsFullScan: sawRelevantMismatchedTerminal)
     }
 
     static func codexApprovalsReviewerIsAutoReview(at url: URL) -> Bool {
@@ -344,6 +377,11 @@ enum JSONLReader {
             return false
         }
         return completedAt >= startedAt
+    }
+
+    private static func fileSize(at url: URL) -> UInt64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.uint64Value
     }
 
     private static let fractionalTimestampFormatter: ISO8601DateFormatter = {

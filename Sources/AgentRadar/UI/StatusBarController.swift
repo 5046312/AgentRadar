@@ -271,6 +271,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private func scheduleNextStatusAnimationTick() {
         statusAnimationTimer?.invalidate()
+        guard shouldAnimateStatusItem() else {
+            statusAnimationTimer = nil
+            return
+        }
         let randomizedInterval = clampedStatusAnimationInterval(nextStatusAnimationInterval())
         let timer = Timer(timeInterval: randomizedInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
@@ -289,6 +293,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
         statusAnimationTimer = timer
         RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func shouldAnimateStatusItem() -> Bool {
+        activeAnimationActiveCount > 0
+            || activeAnimationAggregateStatus != .idle
+            || isCompletionFlashActive()
+            || isErrorWaveActive()
     }
 
     private func nextStatusAnimationInterval() -> TimeInterval {

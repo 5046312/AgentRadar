@@ -5,6 +5,14 @@ cd "$(dirname "$0")"
 
 APP_NAME="AgentRadar"
 APP_BUNDLE="$APP_NAME.app"
+ICON_WORK_DIR=""
+
+cleanup() {
+    if [[ -n "$ICON_WORK_DIR" && -d "$ICON_WORK_DIR" ]]; then
+        rm -rf "$ICON_WORK_DIR"
+    fi
+}
+trap cleanup EXIT
 
 echo "[1/5] generate AppIcon.icns"
 ICON_SRC="Assets/AppIcon-1024.png"
@@ -33,10 +41,10 @@ elif [[ -f "$ICON_OUT" ]]; then
     # iconutil 在部分系统上会误判 iconset，已有 icns 时保留旧图标继续打包。
     echo "warning: failed to regenerate $ICON_OUT, reusing existing file" >&2
 else
-    rm -rf "$ICON_WORK_DIR"
     exit 1
 fi
 rm -rf "$ICON_WORK_DIR"
+ICON_WORK_DIR=""
 
 echo "[2/5] swift build -c release"
 swift build -c release
@@ -60,9 +68,8 @@ echo "[4/5] refresh icon cache"
 touch "$APP_BUNDLE"
 
 echo "[5/5] codesign ad-hoc"
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
+codesign --force --deep --sign - "$APP_BUNDLE"
 
 echo "done -> $APP_BUNDLE"
 echo
-echo "运行：open ./$APP_BUNDLE"
-echo "或后台启动：./$APP_BUNDLE/Contents/MacOS/$APP_NAME &"
+echo "安装并运行：./package-and-run.sh"

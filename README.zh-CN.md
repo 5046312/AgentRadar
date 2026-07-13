@@ -17,6 +17,7 @@ AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 
 - 任务完成、失败、等待确认支持状态栏气泡或系统消息提醒。
 - 状态栏气泡会根据内容自适应宽度；完成提醒会显示耗时。
 - 内置 hooks 安装器，写入前先展示 diff 预览。
+- 支持手动启动 OpenAI 兼容接口探测，API Key 保存到 macOS Keychain。
 - 原生 Swift/AppKit/SwiftUI，无 `jq` 或第三方运行依赖。
 
 ## 状态检测
@@ -36,10 +37,17 @@ AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 
 
 ```bash
 ./build.sh
-open ./AgentRadar.app
 ```
 
 `build.sh` 会执行 SwiftPM release 构建，并生成 `AgentRadar.app`。
+
+打包、安装并运行最新版本：
+
+```bash
+./package-and-run.sh
+```
+
+该命令会构建 `AgentRadar.app`、生成 `AgentRadar.dmg`、把最新 App 安装到 `/Applications/AgentRadar.app`、关闭旧实例，并且只启动安装后的 App。替换或二进制校验失败时会恢复安装前状态；仅在 `/Applications` 无法直接写入时请求管理员授权。
 
 ## 安装 Hooks
 
@@ -50,6 +58,8 @@ open ./AgentRadar.app
 ```bash
 ./install-hooks.sh
 ```
+
+脚本使用 `/Applications/AgentRadar.app` 内的稳定可执行文件。请先运行 `./package-and-run.sh`。
 
 安装逻辑由 AgentRadar 原生实现，不依赖 `jq`。它会更新 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.codex/hooks.json`。
 
@@ -79,6 +89,7 @@ AgentRadar 安装的 Codex hooks：
 - 九宫格速度：默认基础速度 1 秒/格，可在 0.25 到 2 秒/格之间调整。
 - 亮点切换速度会乘以运行中项目数。
 - 间隔左右浮动默认 ±50%，输入时只填 0 到 100 的数字。
+- 已保存的接口探测不会随 App 自动启动；每次成功后停止，连续失败 10 次也会停止，重试间隔按指数退避。
 
 ## 打包 DMG
 
@@ -90,13 +101,16 @@ AgentRadar 安装的 Codex hooks：
 
 ## 隐私
 
-AgentRadar 只读取本机 Claude Code / Codex 会话文件和本机 hook 事件文件。它不会上传数据，也不包含网络请求。
+AgentRadar 会读取本机 Claude Code / Codex 会话文件和本机 hook 事件文件。Hook 记录只保留状态检测需要的字段，并使用受限文件权限存储在本机。
+
+接口探测只在用户新增并启动测试后发送网络请求。请求目标是用户配置的 OpenAI 兼容 Base URL，请求包含所选模型、简短的 `hi` 测试消息，以及 Authorization 请求头中的 API Key。API Key 保存到 macOS Keychain，其他探测配置保存到 UserDefaults。
 
 ## 开发
 
 ```bash
 swift build
 swift run AgentRadar
+swift test
 ```
 
 项目使用 SwiftPM，源码在 `Sources/AgentRadar`。
@@ -105,6 +119,7 @@ swift run AgentRadar
 
 ```bash
 rm -rf AgentRadar.app .build AgentRadar.dmg
+sudo rm -rf /Applications/AgentRadar.app
 rm -rf ~/.agentradar
 ```
 

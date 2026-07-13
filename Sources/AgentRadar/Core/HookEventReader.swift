@@ -15,20 +15,21 @@ final class HookEventReader {
     }
 
     func start() {
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
+        try? HookEventStorage.prepare()
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
            let size = attrs[.size] as? UInt64 {
             fileOffset = size
         }
         attachWatcher()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.drain() }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.source == nil {
+                    try? HookEventStorage.prepare()
+                    self.attachWatcher()
+                }
+                self.drain()
+            }
         }
     }
 
@@ -55,6 +56,7 @@ final class HookEventReader {
                 self.source?.cancel()
                 if self.fd >= 0 { close(self.fd); self.fd = -1 }
                 self.fileOffset = 0
+                try? HookEventStorage.prepare()
                 self.attachWatcher()
                 return
             }
@@ -190,10 +192,14 @@ final class HookEventReader {
         }
 
         let transcriptURL = URL(fileURLWithPath: transcriptPath)
+        let startedAt = hookSession(for: event, runtime: runtime)?.activeStartedAt
         Task { @MainActor [weak self] in
             guard let self else { return }
             for attempt in 0..<6 {
-                switch JSONLReader.codexTurnOutcome(at: transcriptURL, turnId: turnId) {
+                let outcome = await Task.detached(priority: .utility) {
+                    JSONLReader.codexTurnOutcome(at: transcriptURL, turnId: turnId, startedAt: startedAt)
+                }.value
+                switch outcome {
                 case .completed:
                     self.applyCodexStopStatus(.completed, event: event, runtime: runtime, eventTime: eventTime, flashUntil: Date().addingTimeInterval(3))
                     return

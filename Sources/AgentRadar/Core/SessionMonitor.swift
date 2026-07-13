@@ -3,9 +3,17 @@ import CoreServices
 
 @MainActor
 final class SessionMonitor {
+    private struct InitialScanResult: Sendable {
+        let claudeFiles: [URL]
+        let codexFiles: [URL]
+    }
+
     private let store: SessionStore
     private var streams: [FSEventStreamRef] = []
     private var idleTimer: Timer?
+    private var initialScanTask: Task<Void, Never>?
+    private var codexSettlementTask: Task<Void, Never>?
+    private var codexThreadNameRefreshTask: Task<Void, Never>?
     private let initialScanFileLimit = 80
     private let initialScanTailBytes: UInt64 = 64 * 1024
     private let eventScanDirectoryLimit = 40
@@ -22,13 +30,13 @@ final class SessionMonitor {
             let dir = PathUtils.sessionsDir(for: runtime)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             startFSEvents(path: dir.path)
-            scanInitial(runtime: runtime)
         }
+        startInitialScan()
         idleTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.refreshCodexThreadNames()
-                self.store.tickIdle()
+                self.refreshIdleStates()
             }
         }
     }
@@ -42,64 +50,103 @@ final class SessionMonitor {
         streams.removeAll()
         idleTimer?.invalidate()
         idleTimer = nil
+        initialScanTask?.cancel()
+        initialScanTask = nil
+        codexSettlementTask?.cancel()
+        codexSettlementTask = nil
+        codexThreadNameRefreshTask?.cancel()
+        codexThreadNameRefreshTask = nil
     }
 
-    private func scanInitial(runtime: RuntimeKind) {
-        switch runtime {
-        case .claude:
-            scanClaudeInitial()
-        case .codex:
-            refreshCodexThreadNames(force: true)
-            scanCodexInitial()
+    private func refreshIdleStates() {
+        let now = Date()
+        let candidates = store.codexSettlementCandidates(now: now)
+        store.tickIdle(now: now)
+        guard codexSettlementTask == nil, !candidates.isEmpty else { return }
+
+        codexSettlementTask = Task { [weak self] in
+            let settledTurns = await Task.detached(priority: .utility) { () -> [String: String] in
+                Dictionary(uniqueKeysWithValues: candidates.compactMap { candidate in
+                    switch JSONLReader.codexTurnOutcome(
+                        at: candidate.fileURL,
+                        turnId: candidate.turnId,
+                        startedAt: candidate.startedAt
+                    ) {
+                    case .completed, .interrupted, .failed:
+                        return (candidate.sessionId, candidate.turnId)
+                    case .pending:
+                        return nil
+                    }
+                })
+            }.value
+
+            guard !Task.isCancelled, let self else { return }
+            self.store.tickIdle(settledCodexTurns: settledTurns)
+            self.codexSettlementTask = nil
         }
     }
 
-    private func scanClaudeInitial() {
-        let dir = PathUtils.sessionsDir(for: .claude)
-        guard let projects = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+    private func startInitialScan() {
+        initialScanTask?.cancel()
+        let fileLimit = initialScanFileLimit
+        initialScanTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Self.makeInitialScanResult(fileLimit: fileLimit)
+            }.value
+
+            guard !Task.isCancelled, let self else { return }
+            self.codexThreadNameIndexSignature = nil
+            self.refreshCodexThreadNames(force: true)
+
+            // 每个文件处理后主动让出主线程，避免恢复历史会话时阻塞菜单栏交互。
+            for url in result.claudeFiles {
+                guard !Task.isCancelled else { return }
+                self.ingestFile(url, runtime: .claude)
+                await Task.yield()
+            }
+            for url in result.codexFiles {
+                guard !Task.isCancelled else { return }
+                self.ingestFile(url, runtime: .codex, allowCodexCreate: true)
+                await Task.yield()
+            }
+            self.initialScanTask = nil
+        }
+    }
+
+    nonisolated private static func makeInitialScanResult(fileLimit: Int) -> InitialScanResult {
+        InitialScanResult(
+            claudeFiles: recentClaudeJSONLFiles(limit: fileLimit),
+            codexFiles: recentCodexJSONLFiles(limit: fileLimit)
+        )
+    }
+
+    nonisolated private static func recentClaudeJSONLFiles(limit: Int) -> [URL] {
+        let root = PathUtils.sessionsDir(for: .claude)
+        guard let projects = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return []
+        }
+
         var candidates: [(url: URL, modifiedAt: Date)] = []
-
-        for project in projects {
-            let projectDir = dir.appendingPathComponent(project)
-            candidates.append(contentsOf: claudeJSONLCandidates(in: projectDir))
+        for projectDir in projects {
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: projectDir,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            for url in files where url.pathExtension == "jsonl" {
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                candidates.append((url, values?.contentModificationDate ?? .distantPast))
+            }
         }
-
-        // 启动阶段只恢复最近会话的尾部，避免大量历史 transcript 阻塞菜单栏交互。
-        let recentFiles = candidates
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .prefix(initialScanFileLimit)
-
-        for candidate in recentFiles {
-            ingestFile(candidate.url, runtime: .claude)
-        }
+        return candidates.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(limit).map(\.url)
     }
 
-    private func claudeJSONLCandidates(in dir: URL) -> [(url: URL, modifiedAt: Date)] {
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        return files.compactMap { fileName in
-            guard fileName.hasSuffix(".jsonl") else { return nil }
-            let url = dir.appendingPathComponent(fileName)
-            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-            let modifiedAt = attributes?[.modificationDate] as? Date ?? .distantPast
-            return (url, modifiedAt)
-        }
-    }
-
-    private func scanCodexInitial() {
-        let dir = PathUtils.sessionsDir(for: .codex)
-        // App 重启后 hook 事件不会重放；从最近 transcript 恢复旧会话行，避免 Codex 菜单空白。
-        let recentFiles = codexJSONLCandidates(under: dir)
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .prefix(initialScanFileLimit)
-
-        for candidate in recentFiles {
-            ingestFile(candidate.url, runtime: .codex, allowCodexCreate: true)
-        }
-    }
-
-    private func codexJSONLCandidates(under dir: URL) -> [(url: URL, modifiedAt: Date)] {
+    nonisolated private static func recentCodexJSONLFiles(limit: Int) -> [URL] {
+        let root = PathUtils.sessionsDir(for: .codex)
         guard let enumerator = FileManager.default.enumerator(
-            at: dir,
+            at: root,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else {
@@ -107,12 +154,23 @@ final class SessionMonitor {
         }
 
         var candidates: [(url: URL, modifiedAt: Date)] = []
-        for case let url as URL in enumerator {
-            guard url.pathExtension == "jsonl" else { continue }
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             candidates.append((url, values?.contentModificationDate ?? .distantPast))
         }
-        return candidates
+        // 完整枚举放后台执行，保留“按文件真实修改时间取最近会话”的原有行为。
+        return candidates.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(limit).map(\.url)
+    }
+
+    nonisolated private static func makeCodexThreadNameIndexSignature() -> String? {
+        guard
+            let attributes = try? FileManager.default.attributesOfItem(atPath: PathUtils.codexSessionIndexFile.path),
+            let modifiedAt = attributes[.modificationDate] as? Date
+        else {
+            return nil
+        }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        return "\(modifiedAt.timeIntervalSince1970):\(size)"
     }
 
     private func ingestFile(_ url: URL, runtime: RuntimeKind, allowCodexCreate: Bool = false) {
@@ -214,20 +272,26 @@ final class SessionMonitor {
 
     private func refreshCodexThreadNames(force: Bool = false) {
         let url = PathUtils.codexSessionIndexFile
-        guard
-            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-            let modifiedAt = attributes[.modificationDate] as? Date
-        else {
-            return
-        }
-
-        let size = attributes[.size] as? UInt64 ?? 0
-        let signature = "\(modifiedAt.timeIntervalSince1970):\(size)"
+        guard let signature = Self.makeCodexThreadNameIndexSignature() else { return }
         guard force || signature != codexThreadNameIndexSignature else { return }
 
         codexThreadNameIndexSignature = signature
-        // session_index 只负责 Codex 自动标题；任务状态仍由 hook / transcript 事件链维护。
-        store.updateCodexThreadNames(JSONLReader.readCodexThreadNames(from: url))
+        codexThreadNameRefreshTask?.cancel()
+        codexThreadNameRefreshTask = Task { [weak self] in
+            let names = await Task.detached(priority: .utility) {
+                JSONLReader.readCodexThreadNames(from: url)
+            }.value
+            guard
+                !Task.isCancelled,
+                let self,
+                self.codexThreadNameIndexSignature == signature
+            else {
+                return
+            }
+            // session_index 只负责 Codex 自动标题；任务状态仍由 hook / transcript 事件链维护。
+            self.store.updateCodexThreadNames(names)
+            self.codexThreadNameRefreshTask = nil
+        }
     }
 
     private func normalizeRestoredCodexSession(_ session: inout Session) {

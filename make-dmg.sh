@@ -6,9 +6,19 @@ cd "$(dirname "$0")"
 APP_NAME="AgentRadar"
 APP_BUNDLE="$APP_NAME.app"
 DMG_NAME="$APP_NAME.dmg"
-DMG_TEMP="$APP_NAME-temp.dmg"
 VOL_NAME="$APP_NAME"
-STAGING="/tmp/agentradar-dmg-staging"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentradar-dmg.XXXXXX")"
+DMG_TEMP="$WORK_DIR/$APP_NAME-temp.dmg"
+STAGING="$WORK_DIR/staging"
+DEVICE=""
+
+cleanup() {
+    if [[ -n "$DEVICE" ]]; then
+        hdiutil detach "$DEVICE" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
 
 # 先构建
 if [[ ! -d "$APP_BUNDLE" ]]; then
@@ -17,13 +27,12 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
 fi
 
 echo "[1/4] 准备 DMG 内容"
-rm -rf "$STAGING"
 mkdir -p "$STAGING"
 cp -R "$APP_BUNDLE" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 
 echo "[2/4] 创建 DMG"
-rm -f "$DMG_TEMP" "$DMG_NAME"
+rm -f "$DMG_NAME"
 hdiutil create -volname "$VOL_NAME" \
     -srcfolder "$STAGING" \
     -ov -format UDRW \
@@ -31,7 +40,6 @@ hdiutil create -volname "$VOL_NAME" \
 
 echo "[3/4] 设置窗口样式"
 DEVICE=$(hdiutil attach -readwrite -noverify "$DMG_TEMP" | grep '/Volumes/' | awk '{print $1}')
-MOUNT="/Volumes/$VOL_NAME"
 
 osascript <<EOF
 tell application "Finder"
@@ -51,12 +59,11 @@ tell application "Finder"
 end tell
 EOF
 sync
-hdiutil detach "$DEVICE" 2>/dev/null || true
+hdiutil detach "$DEVICE"
+DEVICE=""
 
 echo "[4/4] 压缩 DMG"
 hdiutil convert "$DMG_TEMP" -format UDZO -imagekey zlib-level=9 -o "$DMG_NAME"
-rm -f "$DMG_TEMP"
-rm -rf "$STAGING"
 
 echo
 echo "完成 → $DMG_NAME ($(du -h "$DMG_NAME" | cut -f1))"

@@ -7,6 +7,7 @@ Thanks for helping improve AgentRadar.
 ```bash
 swift build
 swift run AgentRadar
+swift test
 ```
 
 Use the existing SwiftPM layout and keep changes focused.

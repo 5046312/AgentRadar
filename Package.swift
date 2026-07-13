@@ -12,6 +12,11 @@ let package = Package(
             name: "AgentRadar",
             path: "Sources/AgentRadar",
             resources: []
+        ),
+        .testTarget(
+            name: "AgentRadarTests",
+            dependencies: ["AgentRadar"],
+            path: "Tests/AgentRadarTests"
         )
     ]
 )
