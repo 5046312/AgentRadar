@@ -273,7 +273,15 @@ private struct HookSettingsView: View {
                 statusRow("Claude hooks", store.state.claudeInstalled)
                 statusRow("Codex features.hooks", store.state.codexFeatureEnabled)
                 statusRow("Codex hooks.json", store.state.codexHooksInstalled)
-                eventFileRow
+                statusRow("事件文件", store.state.eventsFileExists) {
+                    Button("清空") {
+                        prepareClearEventsConfirmation()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .disabled(!store.state.eventsFileExists || store.isApplying)
+                }
 
                 if let message = store.lastMessage {
                     Text(message)
@@ -608,6 +616,16 @@ private struct HookSettingsView: View {
     }
 
     private func statusRow(_ title: String, _ ok: Bool) -> some View {
+        statusRow(title, ok) {
+            EmptyView()
+        }
+    }
+
+    private func statusRow<Trailing: View>(
+        _ title: String,
+        _ ok: Bool,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
         HStack(spacing: 8) {
             Circle()
                 .fill(ok ? Color.green : Color.orange)
@@ -618,27 +636,7 @@ private struct HookSettingsView: View {
             Text(ok ? "OK" : "未安装")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    private var eventFileRow: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(store.state.eventsFileExists ? Color.green : Color.orange)
-                .frame(width: 8, height: 8)
-            Text("事件文件")
-                .font(.system(size: 11, weight: .medium))
-            Spacer()
-            Text(store.state.eventsFileExists ? "OK" : "未安装")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Button("清空") {
-                prepareClearEventsConfirmation()
-            }
-            .buttonStyle(.borderless)
-            .font(.system(size: 10))
-            .foregroundStyle(.red)
-            .disabled(!store.state.eventsFileExists || store.isApplying)
+            trailing()
         }
     }
 
