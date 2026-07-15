@@ -157,6 +157,20 @@ enum HookEventStorage {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
+
+    static func truncateIfNeeded(at url: URL) throws {
+        let fd = open(url.path, O_WRONLY | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        try truncateIfNeeded(fileDescriptor: fd)
+    }
 }
 
 enum HookConfigurationManager {

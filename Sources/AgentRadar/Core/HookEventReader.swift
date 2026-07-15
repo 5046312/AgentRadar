@@ -16,6 +16,8 @@ final class HookEventReader {
 
     func start() {
         try? HookEventStorage.prepare()
+        // App 启动时先清理超限旧事件，避免没有新 hook 时大文件一直残留。
+        try? HookEventStorage.truncateIfNeeded(at: url)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
            let size = attrs[.size] as? UInt64 {
             fileOffset = size
