@@ -83,6 +83,7 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 ## Settings
 
+- Event file: view its current size and confirm before clearing all data.
 - Reminder style: status bar bubble or system notification.
 - Sound: toggle completion sound.
 - Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted from 0.25 to 2 seconds per cell.

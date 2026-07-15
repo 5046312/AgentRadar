@@ -25,6 +25,16 @@ final class HookEventStorageTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), contents)
     }
 
+    func testClearsEventFile() throws {
+        let url = temporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("event\n".utf8).write(to: url)
+
+        try HookEventStorage.clear(at: url)
+
+        XCTAssertEqual(try Data(contentsOf: url), Data())
+    }
+
     private func temporaryFileURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("AgentRadar-HookEventStorage-\(UUID().uuidString).jsonl")

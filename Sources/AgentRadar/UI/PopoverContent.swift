@@ -261,6 +261,8 @@ private struct HookSettingsView: View {
     @State private var notificationMessage: String?
     @State private var notificationErrorMessage: String?
     @State private var intervalVariationText = ""
+    @State private var showingClearEventsConfirmation = false
+    @State private var eventFileSizeDescription = "未知"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -271,7 +273,7 @@ private struct HookSettingsView: View {
                 statusRow("Claude hooks", store.state.claudeInstalled)
                 statusRow("Codex features.hooks", store.state.codexFeatureEnabled)
                 statusRow("Codex hooks.json", store.state.codexHooksInstalled)
-                statusRow("事件文件", store.state.eventsFileExists)
+                eventFileRow
 
                 if let message = store.lastMessage {
                     Text(message)
@@ -431,6 +433,14 @@ private struct HookSettingsView: View {
             if let pendingPlan = store.pendingPlan {
                 HookInstallPreviewSheet(store: store, plan: pendingPlan)
             }
+        }
+        .alert("清空事件文件？", isPresented: $showingClearEventsConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("确认清空", role: .destructive) {
+                store.clearEventsFile()
+            }
+        } message: {
+            Text("当前容量：\(eventFileSizeDescription)\n确认删除事件文件中的全部数据吗？此操作无法撤销。")
         }
         .onAppear {
             syncIntervalVariationText()
@@ -611,6 +621,27 @@ private struct HookSettingsView: View {
         }
     }
 
+    private var eventFileRow: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(store.state.eventsFileExists ? Color.green : Color.orange)
+                .frame(width: 8, height: 8)
+            Text("事件文件")
+                .font(.system(size: 11, weight: .medium))
+            Spacer()
+            Text(store.state.eventsFileExists ? "OK" : "未安装")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Button("清空") {
+                prepareClearEventsConfirmation()
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10))
+            .foregroundStyle(.red)
+            .disabled(!store.state.eventsFileExists || store.isApplying)
+        }
+    }
+
     private func formatInterval(_ value: Double) -> String {
         String(format: "%.2f", value)
     }
@@ -621,6 +652,17 @@ private struct HookSettingsView: View {
 
     private func syncIntervalVariationText() {
         intervalVariationText = formatPercent(sessionStore.nineGridIntervalVariationPercent)
+    }
+
+    private func prepareClearEventsConfirmation() {
+        // 点击时再读取，确保确认框显示设置页打开期间持续增长后的实际容量。
+        let attributes = try? FileManager.default.attributesOfItem(atPath: PathUtils.hookEventsFile.path)
+        if let size = attributes?[.size] as? NSNumber {
+            eventFileSizeDescription = ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+        } else {
+            eventFileSizeDescription = "未知"
+        }
+        showingClearEventsConfirmation = true
     }
 
     private func numericText(from value: String) -> String {

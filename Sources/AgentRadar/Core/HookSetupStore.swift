@@ -120,6 +120,20 @@ final class HookSetupStore: ObservableObject {
 
         isApplying = false
     }
+
+    func clearEventsFile() {
+        lastMessage = nil
+        errorMessage = nil
+
+        do {
+            try HookEventStorage.clear(at: PathUtils.hookEventsFile)
+            refresh()
+            lastMessage = "事件文件已清空。"
+        } catch {
+            refresh()
+            errorMessage = "清空事件文件失败：\(error.localizedDescription)"
+        }
+    }
 }
 
 enum HookEventStorage {
@@ -159,6 +173,20 @@ enum HookEventStorage {
     }
 
     static func truncateIfNeeded(at url: URL) throws {
+        try withLockedFile(at: url) { fd in
+            try truncateIfNeeded(fileDescriptor: fd)
+        }
+    }
+
+    static func clear(at url: URL) throws {
+        try withLockedFile(at: url) { fd in
+            guard ftruncate(fd, 0) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+    }
+
+    private static func withLockedFile(at url: URL, operation: (Int32) throws -> Void) throws {
         let fd = open(url.path, O_WRONLY | O_CLOEXEC)
         guard fd >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -169,7 +197,7 @@ enum HookEventStorage {
         }
         defer { flock(fd, LOCK_UN) }
 
-        try truncateIfNeeded(fileDescriptor: fd)
+        try operation(fd)
     }
 }
 
