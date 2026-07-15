@@ -5,11 +5,9 @@ import AppKit
 struct PopoverContent: View {
     @ObservedObject var store: SessionStore
     @StateObject private var hookSetup: HookSetupStore
-    @StateObject private var probeTestStore: ProbeTestStore
     @State private var selectedRuntime: RuntimeKind = .claude
     @State private var showingHelp = false
     @State private var showingSettings = false
-    @State private var showingProbeTests = false
     @State private var now = Date()
     @State private var clockTimer: Timer?
     @State private var clockTimerInterval: TimeInterval?
@@ -17,7 +15,6 @@ struct PopoverContent: View {
     init(store: SessionStore) {
         self.store = store
         _hookSetup = StateObject(wrappedValue: HookSetupStore())
-        _probeTestStore = StateObject(wrappedValue: ProbeTestStore(sessionStore: store))
         _selectedRuntime = State(initialValue: store.defaultRuntime)
     }
 
@@ -59,9 +56,6 @@ struct PopoverContent: View {
         .onReceive(store.$version) { _ in
             syncClockTimer()
         }
-        .sheet(isPresented: $showingProbeTests) {
-            ProbeTestSheet(store: probeTestStore, isPresented: $showingProbeTests)
-        }
     }
 
     private func header(summary: PopoverSessionSummary) -> some View {
@@ -84,13 +78,6 @@ struct PopoverContent: View {
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
                     HookSettingsView(store: hookSetup, sessionStore: store)
                 }
-                Button(action: { showingProbeTests = true }) {
-                    Image(systemName: "testtube.2")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("测试")
                 Button(action: { showingHelp = true }) {
                     Image(systemName: "questionmark.circle")
                         .font(.system(size: 12, weight: .semibold))

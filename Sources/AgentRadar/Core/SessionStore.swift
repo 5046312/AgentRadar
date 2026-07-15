@@ -184,7 +184,6 @@ final class SessionStore: ObservableObject {
     @Published private(set) var latestCompletion: CompletionNotice?
     @Published private(set) var latestFailure: FailureNotice?
     @Published private(set) var latestWaiting: WaitingNotice?
-    @Published private(set) var latestProbeSuccess: ProbeSuccessNotice?
     @Published var soundEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.soundEnabled)
     @Published var systemNotificationEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.systemNotificationEnabled)
     @Published var completionConfirmationEnabled: Bool = SessionStore.loadBool(
@@ -666,14 +665,6 @@ final class SessionStore: ObservableObject {
     func publishTestFailureNotice() {
         // 测试按钮只发布同一种失败事件；真实错误动画和弹窗仍由 StatusBarController 统一处理。
         latestFailure = FailureNotice(projectName: "AgentRadar")
-    }
-
-    func publishProbeSuccessNotice(baseURL: String, model: String) {
-        let host = URL(string: baseURL)?.host ?? baseURL
-        latestProbeSuccess = ProbeSuccessNotice(
-            title: "接口测试成功",
-            body: "\(host)\n模型：\(model)"
-        )
     }
 
     private func playCompletionSound() {

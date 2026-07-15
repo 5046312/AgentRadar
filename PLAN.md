@@ -1,6 +1,6 @@
 # AgentRadar — Claude Code 状态栏监控器
 
-> 历史设计草案。当前实现已支持 Claude Code、Codex、接口探测和新版九宫格状态栏；实际行为以 README 与 `Sources/AgentRadar` 为准。
+> 历史设计草案。当前实现已支持 Claude Code、Codex 和新版九宫格状态栏；实际行为以 README 与 `Sources/AgentRadar` 为准。
 
 > macOS 原生菜单栏 App，常驻状态栏，红绿灯+脉冲动画展示多个 Claude Code 任务运行状态，悬浮显示明细。
 

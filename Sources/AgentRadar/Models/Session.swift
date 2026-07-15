@@ -90,12 +90,6 @@ struct WaitingNotice: Identifiable, Equatable {
     }
 }
 
-struct ProbeSuccessNotice: Identifiable, Equatable {
-    let id = UUID()
-    let title: String
-    let body: String
-}
-
 extension CompletionNotice {
     var titleText: String {
         projectName

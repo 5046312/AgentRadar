@@ -64,7 +64,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var completionCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var waitingCancellable: AnyCancellable?
-    private var probeSuccessCancellable: AnyCancellable?
     private var statusAnimationTimer: Timer?
     private var activeAnimationInterval: TimeInterval?
     private var activeAnimationVariationPercent: Double?
@@ -157,11 +156,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         waitingCancellable = store.$latestWaiting.compactMap { $0 }.sink { [weak self] notice in
             Task { @MainActor in
                 await self?.presentWaitingNotice(notice)
-            }
-        }
-        probeSuccessCancellable = store.$latestProbeSuccess.compactMap { $0 }.sink { [weak self] notice in
-            Task { @MainActor in
-                await self?.presentProbeSuccessNotice(notice)
             }
         }
         refresh()
@@ -882,17 +876,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             body: notice.notificationBodyText,
             identifierPrefix: "waiting"
         )
-    }
-
-    private func presentProbeSuccessNotice(_ notice: ProbeSuccessNotice) async {
-        if await showSystemNotification(
-            title: notice.title,
-            body: notice.body,
-            identifierPrefix: "probe-success"
-        ) {
-            return
-        }
-        showNoticeAlert(title: notice.title, body: notice.body, style: .informational)
     }
 
     private func showSystemNotification(title: String, body: String, identifierPrefix: String) async -> Bool {

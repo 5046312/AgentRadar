@@ -17,7 +17,6 @@ AgentRadar is a native macOS menu bar app for monitoring Claude Code and Codex p
 - Completion, failure, and confirmation-waiting reminders via status bar bubble or system notification.
 - Status bar bubbles auto-size to content. Completion reminders include duration.
 - In-app hook installer with diff preview before writing.
-- User-started OpenAI-compatible endpoint probes with Keychain-backed API keys.
 - Native Swift/AppKit/SwiftUI app. No `jq` or third-party runtime dependency.
 
 ## Status Detection
@@ -89,7 +88,6 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 - Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted from 0.25 to 2 seconds per cell.
 - Tick speed is multiplied by the number of running projects.
 - Interval variation defaults to +/-50%; enter a number from 0 to 100 only.
-- Saved endpoint probes do not start automatically. Each run stops after success or 10 failed attempts, with exponential backoff.
 
 ## Package DMG
 
@@ -102,8 +100,6 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 ## Privacy
 
 AgentRadar reads local Claude Code / Codex session files and local hook events. Hook records contain only fields required for status detection and are stored locally with restricted permissions.
-
-Endpoint probes make network requests only after you add a probe and start it. Requests go to the configured OpenAI-compatible Base URL and include the selected model, a short `hi` prompt, and the API Key in the Authorization header. API Keys are stored in macOS Keychain; probe metadata is stored in UserDefaults.
 
 ## Development
 
