@@ -41,6 +41,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let animationStep: Int
         let cellTones: [RunningCellTone]
         let isErrorWaveActive: Bool
+        let isLoopActive: Bool
+        let loopSucceeded: Bool?
     }
 
     // 状态栏矩阵统一使用 3x3，避免绘制和动画步进尺寸不一致。
@@ -65,6 +67,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var loopSuccessCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var waitingCancellable: AnyCancellable?
+    private var loopPhaseCancellable: AnyCancellable?
+    private var loopResultCancellable: AnyCancellable?
     private var statusAnimationTimer: Timer?
     private var activeAnimationInterval: TimeInterval?
     private var activeAnimationVariationPercent: Double?
@@ -165,6 +169,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 await self?.presentWaitingNotice(notice)
             }
         }
+        loopPhaseCancellable = loopStore.$phase.sink { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        loopResultCancellable = loopStore.$streakSucceeded.sink { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
         refresh()
     }
 
@@ -250,7 +260,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let needsActiveCountUpdate = activeAnimationActiveCount != activeCount
         let needsStatusUpdate = activeAnimationAggregateStatus != aggregateStatus
         let needsWaitingUpdate = activeAnimationHasWaitingInActiveProject != summary.hasWaitingInActiveProject
-        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate || needsStatusUpdate || needsWaitingUpdate else {
+        let needsLoopUpdate = lastStatusRenderKey?.isLoopActive != loopStore.isActive
+        guard statusAnimationTimer == nil || needsIntervalUpdate || needsVariationUpdate || needsActiveCountUpdate || needsStatusUpdate || needsWaitingUpdate || needsLoopUpdate else {
             return
         }
 
@@ -301,11 +312,15 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             || activeAnimationAggregateStatus != .idle
             || isCompletionFlashActive()
             || isErrorWaveActive()
+            || loopStore.isActive
     }
 
     private func nextStatusAnimationInterval() -> TimeInterval {
         if isErrorWaveActive() {
             return errorWaveTickInterval
+        }
+        if loopStore.isActive {
+            return 0.12
         }
         return activeAnimationActiveCount > 0 ? nextBreathingAnimationInterval() : nextAmbientGridAnimationInterval()
     }
@@ -370,7 +385,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             ambientEffect: ambientGridEffect,
             animationStep: statusAnimationStep,
             cellTones: statusAnimationCellTones,
-            isErrorWaveActive: errorWaveActive
+            isErrorWaveActive: errorWaveActive,
+            isLoopActive: loopStore.isActive,
+            loopSucceeded: loopStore.streakSucceeded
         )
         guard lastStatusRenderKey != nextKey else { return }
         let previousKey = lastStatusRenderKey
@@ -552,9 +569,29 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             }
         }
 
+        if loopStore.isActive {
+            drawLoopLoadingRing(in: rect)
+        }
         if activeCount > 0 {
             drawActiveCount(activeCount, in: rect)
         }
+    }
+
+    private func drawLoopLoadingRing(in rect: NSRect) {
+        let ringRect = rect.insetBy(dx: 1.2, dy: 1.2)
+        let path = NSBezierPath()
+        let startAngle = CGFloat(statusAnimationStep * 18 % 360)
+        path.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: startAngle, endAngle: startAngle + 285, clockwise: false)
+        path.lineWidth = 1.3
+        switch loopStore.streakSucceeded {
+        case true:
+            NSColor.systemGreen.setStroke()
+        case false:
+            NSColor.systemRed.setStroke()
+        case nil:
+            NSColor.secondaryLabelColor.setStroke()
+        }
+        path.stroke()
     }
 
     private func drawActiveCount(_ activeCount: Int, in rect: NSRect) {
