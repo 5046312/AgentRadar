@@ -73,6 +73,13 @@ struct LoopSuccessNotice: Identifiable, Equatable {
     let count: Int
     let message: String
     let duration: TimeInterval
+
+    init(count: Int, message: String, duration: TimeInterval) {
+        self.count = count
+        // 通知只展示结果开头，提前截断可避免完整长回复常驻通知状态。
+        self.message = String(message.prefix(500))
+        self.duration = duration
+    }
 }
 
 struct FailureNotice: Identifiable, Equatable {
@@ -124,7 +131,7 @@ extension LoopSuccessNotice {
     }
 
     var notificationBodyText: String {
-        [String(message.prefix(500)), formattedNoticeDuration(duration)]
+        [message, formattedNoticeDuration(duration)]
             .compactMap { $0 }
             .joined(separator: "\n")
     }

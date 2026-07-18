@@ -24,6 +24,7 @@ AgentRadar 是一个原生 macOS 菜单栏工具，用来监控 Claude Code 和 
 
 - Claude 读取 `~/.claude/projects/**/*.jsonl`；hooks 用来提高运行、等待、完成状态的准确性。
 - Codex 任务状态只依赖 hooks；JSONL/transcript 只用于补充项目、会话信息和最终回合结果。
+- 启动时恢复本机完整 Codex session 列表，不再只截取最新文件。
 - hooks 事件统一追加到 `~/.agentradar/events.jsonl`，应用会监听文件变化，并每秒兜底读取一次新增事件。
 - 缺少 `transcript_path` 的 Codex 事件、根目录 `/` 任务、内部 memory 路径会被忽略，避免内部后台任务显示成用户项目。
 

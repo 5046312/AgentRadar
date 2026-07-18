@@ -24,6 +24,7 @@ AgentRadar is a native macOS menu bar app for monitoring Claude Code and Codex p
 
 - Claude reads `~/.claude/projects/**/*.jsonl`; hooks improve running, waiting, and completion transitions.
 - Codex task status is hook-only. JSONL/transcript data only fills project/session details and final turn outcome.
+- Startup restores the complete local Codex session list instead of limiting it to the newest files.
 - Hook records are appended to `~/.agentradar/events.jsonl`. AgentRadar watches file changes and also drains once per second as a fallback.
 - Codex events without `transcript_path`, root `/` tasks, and internal memory paths are ignored so internal background work does not appear as user projects.
 

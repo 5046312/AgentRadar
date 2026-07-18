@@ -14,7 +14,7 @@ final class SessionMonitor {
     private var initialScanTask: Task<Void, Never>?
     private var codexSettlementTask: Task<Void, Never>?
     private var codexThreadNameRefreshTask: Task<Void, Never>?
-    private let initialScanFileLimit = 80
+    private let initialClaudeScanFileLimit = 80
     private let initialScanTailBytes: UInt64 = 64 * 1024
     private let eventScanDirectoryLimit = 40
     private let eventScanFileLimit = 20
@@ -88,10 +88,10 @@ final class SessionMonitor {
 
     private func startInitialScan() {
         initialScanTask?.cancel()
-        let fileLimit = initialScanFileLimit
+        let claudeFileLimit = initialClaudeScanFileLimit
         initialScanTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                Self.makeInitialScanResult(fileLimit: fileLimit)
+                Self.makeInitialScanResult(claudeFileLimit: claudeFileLimit)
             }.value
 
             guard !Task.isCancelled, let self else { return }
@@ -113,10 +113,10 @@ final class SessionMonitor {
         }
     }
 
-    nonisolated private static func makeInitialScanResult(fileLimit: Int) -> InitialScanResult {
+    nonisolated private static func makeInitialScanResult(claudeFileLimit: Int) -> InitialScanResult {
         InitialScanResult(
-            claudeFiles: recentClaudeJSONLFiles(limit: fileLimit),
-            codexFiles: recentCodexJSONLFiles(limit: fileLimit)
+            claudeFiles: recentClaudeJSONLFiles(limit: claudeFileLimit),
+            codexFiles: allCodexJSONLFiles()
         )
     }
 
@@ -143,7 +143,7 @@ final class SessionMonitor {
         return candidates.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(limit).map(\.url)
     }
 
-    nonisolated private static func recentCodexJSONLFiles(limit: Int) -> [URL] {
+    nonisolated private static func allCodexJSONLFiles() -> [URL] {
         let root = PathUtils.sessionsDir(for: .codex)
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -158,8 +158,8 @@ final class SessionMonitor {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             candidates.append((url, values?.contentModificationDate ?? .distantPast))
         }
-        // 完整枚举放后台执行，保留“按文件真实修改时间取最近会话”的原有行为。
-        return candidates.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(limit).map(\.url)
+        // 完整枚举放后台执行，按文件真实修改时间恢复全部 Codex 会话。
+        return candidates.sorted { $0.modifiedAt > $1.modifiedAt }.map(\.url)
     }
 
     nonisolated private static func makeCodexThreadNameIndexSignature() -> String? {
@@ -190,7 +190,7 @@ final class SessionMonitor {
 
         let existing = store.sessions[sessionId]
         if runtime == .codex, existing == nil, !allowCodexCreate {
-            // 运行期仍只信 hook 占位；启动恢复允许最近 transcript 创建旧会话行。
+            // 运行期仍只信 hook 占位；启动恢复允许本地 transcript 创建旧会话行。
             return
         }
         var session = existing ?? Session(
