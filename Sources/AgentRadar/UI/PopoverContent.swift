@@ -4,16 +4,19 @@ import AppKit
 
 struct PopoverContent: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var loopStore: LoopStore
     @StateObject private var hookSetup: HookSetupStore
     @State private var selectedRuntime: RuntimeKind = .claude
     @State private var showingHelp = false
     @State private var showingSettings = false
+    @State private var showingLoop = false
     @State private var now = Date()
     @State private var clockTimer: Timer?
     @State private var clockTimerInterval: TimeInterval?
 
-    init(store: SessionStore) {
+    init(store: SessionStore, loopStore: LoopStore) {
         self.store = store
+        self.loopStore = loopStore
         _hookSetup = StateObject(wrappedValue: HookSetupStore())
         _selectedRuntime = State(initialValue: store.defaultRuntime)
     }
@@ -67,6 +70,16 @@ struct PopoverContent: View {
                     Text("未设置 Hooks")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.red)
+                }
+                Button(action: { showingLoop = true }) {
+                    Image(systemName: "testtube.2")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(loopStore.isActive ? Color.green : Color.secondary)
+                .help("Loop 可用性测试")
+                .popover(isPresented: $showingLoop, arrowEdge: .bottom) {
+                    LoopView(store: loopStore)
                 }
                 Button(action: { showingSettings = true }) {
                     Image(systemName: "gearshape")

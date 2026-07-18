@@ -52,6 +52,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private let store: SessionStore
+    private let loopStore: LoopStore
     private let statusItem: NSStatusItem
     private let popover: NSPopover
     private let minStatusAnimationTickInterval: TimeInterval = 0.08
@@ -62,6 +63,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var speedCancellable: AnyCancellable?
     private var variationCancellable: AnyCancellable?
     private var completionCancellable: AnyCancellable?
+    private var loopSuccessCancellable: AnyCancellable?
     private var failureCancellable: AnyCancellable?
     private var waitingCancellable: AnyCancellable?
     private var statusAnimationTimer: Timer?
@@ -109,8 +111,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         NSColor(calibratedRed: 0.82, green: 0.62, blue: 0.20, alpha: 0.68)
     ])
 
-    init(store: SessionStore) {
+    init(store: SessionStore, loopStore: LoopStore) {
         self.store = store
+        self.loopStore = loopStore
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = NSPopover()
         super.init()
@@ -119,7 +122,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.animates = true
         popover.delegate = self
         popover.contentSize = NSSize(width: 360, height: 420)
-        popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store))
+        popover.contentViewController = NSHostingController(rootView: PopoverContent(store: store, loopStore: loopStore))
 
         if let button = statusItem.button {
             // 多屏菜单栏镜像不会稳定复制自定义 subview；沿用系统 button 的 image/title。
@@ -145,6 +148,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             Task { @MainActor in
                 self?.startCompletionFlashAnimation()
                 await self?.presentCompletionNotice(notice)
+            }
+        }
+        loopSuccessCancellable = loopStore.$latestSuccess.compactMap { $0 }.sink { [weak self] notice in
+            Task { @MainActor in
+                await self?.presentLoopSuccessNotice(notice)
             }
         }
         failureCancellable = store.$latestFailure.compactMap { $0 }.sink { [weak self] notice in
@@ -867,6 +875,23 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             title: notice.titleText,
             body: notice.notificationBodyText,
             identifierPrefix: "failure"
+        )
+    }
+
+    private func presentLoopSuccessNotice(_ notice: LoopSuccessNotice) async {
+        guard store.systemNotificationEnabled else { return }
+        if store.completionConfirmationEnabled {
+            showNoticeAlert(
+                title: notice.titleText,
+                body: notice.notificationBodyText,
+                style: .informational
+            )
+            return
+        }
+        _ = await showSystemNotification(
+            title: notice.titleText,
+            body: notice.notificationBodyText,
+            identifierPrefix: "loop-success"
         )
     }
 

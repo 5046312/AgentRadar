@@ -4,13 +4,14 @@ import UserNotifications
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private let store = SessionStore()
+    private let loopStore = LoopStore()
     private var statusBar: StatusBarController?
     private var monitor: SessionMonitor?
     private var hookReader: HookEventReader?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
-        statusBar = StatusBarController(store: store)
+        statusBar = StatusBarController(store: store, loopStore: loopStore)
         monitor = SessionMonitor(store: store)
         hookReader = HookEventReader(store: store)
         monitor?.start()
@@ -18,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        loopStore.stopForApplicationTermination()
         monitor?.stop()
         hookReader?.stop()
     }

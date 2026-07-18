@@ -68,6 +68,13 @@ struct CompletionNotice: Identifiable, Equatable {
     }
 }
 
+struct LoopSuccessNotice: Identifiable, Equatable {
+    let id = UUID()
+    let count: Int
+    let message: String
+    let duration: TimeInterval
+}
+
 struct FailureNotice: Identifiable, Equatable {
     let id = UUID()
     let projectName: String
@@ -107,20 +114,36 @@ extension CompletionNotice {
     }
 
     var durationText: String? {
-        guard let duration else { return nil }
-        let totalSeconds = max(1, Int(duration.rounded(.up)))
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return "耗时 \(hours)小时\(minutes)分\(seconds)秒"
-        }
-        if minutes > 0 {
-            return "耗时 \(minutes)分\(seconds)秒"
-        }
-        return "耗时 \(seconds)秒"
+        formattedNoticeDuration(duration)
     }
+}
+
+extension LoopSuccessNotice {
+    var titleText: String {
+        "Loop #\(count) 调用成功"
+    }
+
+    var notificationBodyText: String {
+        [String(message.prefix(500)), formattedNoticeDuration(duration)]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+    }
+}
+
+private func formattedNoticeDuration(_ duration: TimeInterval?) -> String? {
+    guard let duration else { return nil }
+    let totalSeconds = max(1, Int(duration.rounded(.up)))
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    let seconds = totalSeconds % 60
+
+    if hours > 0 {
+        return "耗时 \(hours)小时\(minutes)分\(seconds)秒"
+    }
+    if minutes > 0 {
+        return "耗时 \(minutes)分\(seconds)秒"
+    }
+    return "耗时 \(seconds)秒"
 }
 
 extension WaitingNotice {
