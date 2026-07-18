@@ -584,11 +584,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         path.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: startAngle, endAngle: startAngle + 285, clockwise: false)
         path.lineWidth = 1.3
         switch loopStore.streakSucceeded {
-        case true:
+        case .some(true):
             NSColor.systemGreen.setStroke()
-        case false:
+        case .some(false):
             NSColor.systemRed.setStroke()
-        case nil:
+        case .none:
             NSColor.secondaryLabelColor.setStroke()
         }
         path.stroke()
