@@ -118,6 +118,8 @@ final class LoopStore: ObservableObject {
     @Published private(set) var latestSuccess: LoopSuccessNotice?
     @Published private(set) var successCount = 0
     @Published private(set) var failureCount = 0
+    @Published private(set) var streakCount = 0
+    @Published private(set) var streakSucceeded: Bool?
 
     private let defaults: UserDefaults
     private var loopTask: Task<Void, Never>?
@@ -156,6 +158,14 @@ final class LoopStore: ObservableObject {
         defaults.set(enabled, forKey: DefaultsKey.notifyOnSuccess)
     }
 
+    func resetStatistics() {
+        // 仅清零累计结果，保留当前运行状态和最近一次调用详情。
+        successCount = 0
+        failureCount = 0
+        streakCount = 0
+        streakSucceeded = nil
+    }
+
     func start(range: LoopMinuteRange) {
         guard !isActive else { return }
 
@@ -163,8 +173,7 @@ final class LoopStore: ObservableObject {
         lastResult = nil
         errorMessage = nil
         latestSuccess = nil
-        successCount = 0
-        failureCount = 0
+        resetStatistics()
         phase = .resolvingCodex
 
         let runID = UUID()
@@ -232,11 +241,15 @@ final class LoopStore: ObservableObject {
             errorMessage = nil
             if outcome.result.succeeded {
                 successCount += 1
+                streakCount = streakSucceeded == true ? streakCount + 1 : 1
+                streakSucceeded = true
                 if notifyOnSuccess, let message = outcome.notificationMessage {
                     latestSuccess = LoopSuccessNotice(count: count, message: message, duration: outcome.result.duration)
                 }
             } else {
                 failureCount += 1
+                streakCount = streakSucceeded == false ? streakCount + 1 : 1
+                streakSucceeded = false
             }
             count += 1
         }

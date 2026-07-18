@@ -76,19 +76,15 @@ struct PopoverContent: View {
                         Image(systemName: "testtube.2")
                             .font(.system(size: 12, weight: .semibold))
 
-                        VStack(spacing: -2) {
-                            Text("\(loopStore.successCount)")
-                                .foregroundStyle(.green)
-                            Text("\(loopStore.failureCount)")
-                                .foregroundStyle(.red)
-                        }
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        Text("\(loopStore.streakCount)")
+                            .foregroundStyle(loopStore.streakSucceeded == true ? Color.green : loopStore.streakSucceeded == false ? Color.red : Color.secondary)
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .monospacedDigit()
                     }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(loopStore.isActive ? Color.green : Color.secondary)
-                .accessibilityLabel("Loop 测试，成功 \(loopStore.successCount)，失败 \(loopStore.failureCount)")
+                .accessibilityLabel("Loop 测试，最近连续\(loopStore.streakSucceeded == true ? "成功" : loopStore.streakSucceeded == false ? "失败" : "结果") \(loopStore.streakCount) 次")
                 .help("Loop 可用性测试")
                 .popover(isPresented: $showingLoop, arrowEdge: .bottom) {
                     LoopView(store: loopStore)

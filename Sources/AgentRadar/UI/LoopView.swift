@@ -49,6 +49,11 @@ struct LoopView: View {
                 .buttonStyle(.bordered)
                 .disabled(!store.isActive || store.phase == .stopping)
 
+                Button("重置统计") {
+                    store.resetStatistics()
+                }
+                .buttonStyle(.bordered)
+
                 Spacer()
                 statusText
             }
