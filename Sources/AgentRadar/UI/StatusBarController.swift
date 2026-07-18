@@ -77,6 +77,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var activeAnimationHasWaitingInActiveProject = false
     private var activeAnimationOffset = 0.0
     private var statusAnimationStep = 0
+    private var loopAnimationAngle: CGFloat = 0
     private var statusAnimationCellTones = StatusBarController.initialRunningCellTones()
     private var ambientGridEffect = AmbientGridEffect.shimmer
     private var ambientGridEffectRemainingTicks = 0
@@ -271,6 +272,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         activeAnimationActiveCount = activeCount
         activeAnimationAggregateStatus = aggregateStatus
         activeAnimationHasWaitingInActiveProject = summary.hasWaitingInActiveProject
+        if needsLoopUpdate, loopStore.isActive {
+            loopAnimationAngle = 0
+        }
         if isActive {
             if !wasActive || needsActiveCountUpdate || needsWaitingUpdate || statusAnimationStep == 0 {
                 resetRunningGridAnimation()
@@ -291,6 +295,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let timer = Timer(timeInterval: randomizedInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.advanceLoopLoadingRingAnimation()
                 if self.isErrorWaveActive() {
                     self.advanceErrorWaveAnimation()
                 } else if self.activeAnimationActiveCount > 0 {
@@ -578,26 +583,36 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     }
 
     private func drawLoopLoadingRing(in rect: NSRect) {
-        let ringRect = rect.insetBy(dx: 1.2, dy: 1.2)
+        let ringRect = rect.insetBy(dx: 1.8, dy: 1.8)
         let path = NSBezierPath()
-        let startAngle = CGFloat(statusAnimationStep * 18 % 360)
-        path.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: startAngle, endAngle: startAngle + 285, clockwise: false)
-        path.lineWidth = 1.3
+        path.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: loopAnimationAngle, endAngle: loopAnimationAngle + 285, clockwise: false)
+        path.lineWidth = 2
+        let ringColor: NSColor
         switch loopStore.streakSucceeded {
         case .some(true):
-            NSColor.systemGreen.setStroke()
+            ringColor = .systemGreen
         case .some(false):
-            NSColor.systemRed.setStroke()
+            ringColor = .systemRed
         case .none:
-            NSColor.secondaryLabelColor.setStroke()
+            ringColor = .secondaryLabelColor
         }
+
+        // 独立角度保证圆环不受九宫格动画重置影响；同色阴影增强小尺寸状态栏中的轮廓。
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = ringColor.withAlphaComponent(0.75)
+        shadow.shadowBlurRadius = 2
+        shadow.shadowOffset = .zero
+        shadow.set()
+        ringColor.setStroke()
         path.stroke()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func drawActiveCount(_ activeCount: Int, in rect: NSRect) {
         let text = activeCount > 9 ? "9+" : "\(activeCount)"
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold),
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .heavy),
             .foregroundColor: NSColor.white,
             .strokeColor: NSColor.black,
             .strokeWidth: -1.5,
@@ -692,6 +707,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     private func advanceErrorWaveAnimation() {
         statusAnimationStep += 1
+    }
+
+    private func advanceLoopLoadingRingAnimation() {
+        guard loopStore.isActive else { return }
+        loopAnimationAngle = (loopAnimationAngle + 18).truncatingRemainder(dividingBy: 360)
     }
 
     private func drawRunningCell(in rect: NSRect, corner: CGFloat, isNewest: Bool, tone: RunningCellTone) {
