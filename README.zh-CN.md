@@ -96,7 +96,7 @@ AgentRadar 安装的 Codex hooks：
 
 点击主弹窗中的试管按钮可打开独立 Loop 面板。首次 Codex 检查会立即执行，后续每轮按配置的最小/最大分钟重新随机等待；分钟仅支持 1 到 1440 的整数。
 
-检查使用临时、只读的 `codex exec --json` 调用，并忽略用户配置、规则、hooks 和 Git 仓库检查。应用提取最后一条完成的 agent message 作为结果，不创建普通 AgentRadar 会话；退出 AgentRadar 时 Loop 自动停止。成功提示可选，并复用现有任务完成提示配置。
+检查使用当前 Codex 用户配置执行临时、只读的 `codex exec --json` 调用，同时忽略规则、hooks 和 Git 仓库检查。应用提取最后一条完成的 agent message 作为结果，不创建普通 AgentRadar 会话；退出 AgentRadar 时 Loop 自动停止。成功提示可选，并复用现有任务完成提示配置。
 
 ## 打包 DMG
 

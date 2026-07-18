@@ -233,7 +233,6 @@ final class LoopStore: ObservableObject {
                     "exec",
                     "--json",
                     "--ephemeral",
-                    "--ignore-user-config",
                     "--ignore-rules",
                     "--disable", "hooks",
                     "--sandbox", "read-only",

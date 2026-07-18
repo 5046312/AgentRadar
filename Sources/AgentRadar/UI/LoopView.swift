@@ -134,18 +134,22 @@ struct LoopView: View {
 
     @ViewBuilder
     private var statusText: some View {
+        // 等待和执行阶段不会持续发布状态，按秒刷新才能保持右侧计时准确。
         switch store.phase {
         case .idle:
             Text("未启动")
         case .resolvingCodex:
             Text("查找 codex…")
         case let .waiting(count, nextRunAt):
-            HStack(spacing: 4) {
-                Text("#\(count) 等待至")
-                Text(nextRunAt, style: .time)
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text("#\(count) \(remainingSeconds(until: nextRunAt, now: context.date)) 秒后执行")
+                    .monospacedDigit()
             }
-        case let .running(count, _):
-            Text("#\(count) 调用中…")
+        case let .running(count, startedAt):
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text("#\(count) 执行中 \(elapsedSeconds(since: startedAt, now: context.date)) 秒")
+                    .monospacedDigit()
+            }
         case .stopping:
             Text("正在停止…")
         }
@@ -221,5 +225,13 @@ struct LoopView: View {
 
     private func terminationStatusText(_ status: Int32?) -> String {
         status.map(String.init) ?? "-"
+    }
+
+    private func remainingSeconds(until date: Date, now: Date) -> Int {
+        max(0, Int(ceil(date.timeIntervalSince(now))))
+    }
+
+    private func elapsedSeconds(since date: Date, now: Date) -> Int {
+        max(0, Int(now.timeIntervalSince(date)))
     }
 }

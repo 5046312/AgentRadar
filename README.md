@@ -96,7 +96,7 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 Click the test-tube button in the main popover to open the independent Loop panel. The first Codex check runs immediately; later checks wait for a new random interval between the configured minimum and maximum minutes. Valid values are integers from 1 to 1440.
 
-The check uses an ephemeral, read-only `codex exec --json` invocation that ignores user config, rules, hooks, and Git repository checks. It extracts the last completed agent message as the result, does not create a normal AgentRadar session, and stops when AgentRadar exits. Optional success reminders reuse the existing completion reminder settings.
+The check uses the current Codex user config in an ephemeral, read-only `codex exec --json` invocation while ignoring rules, hooks, and Git repository checks. It extracts the last completed agent message as the result, does not create a normal AgentRadar session, and stops when AgentRadar exits. Optional success reminders reuse the existing completion reminder settings.
 
 ## Package DMG
 
