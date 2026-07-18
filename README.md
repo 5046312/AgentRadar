@@ -17,6 +17,7 @@ AgentRadar is a native macOS menu bar app for monitoring Claude Code and Codex p
 - Completion, failure, and confirmation-waiting reminders via status bar bubble or system notification.
 - Status bar bubbles auto-size to content. Completion reminders include duration.
 - In-app hook installer with diff preview before writing.
+- Built-in Codex loop availability test with randomized follow-up intervals and last-result display.
 - Native Swift/AppKit/SwiftUI app. No `jq` or third-party runtime dependency.
 
 ## Status Detection
@@ -89,6 +90,12 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 - Nine-grid speed: base speed defaults to 1 second per cell and can be adjusted from 0.25 to 2 seconds per cell.
 - Tick speed is multiplied by the number of running projects.
 - Interval variation defaults to +/-50%; enter a number from 0 to 100 only.
+
+## Loop Availability Test
+
+Click the test-tube button in the main popover to open the independent Loop panel. The first Codex check runs immediately; later checks wait for a new random interval between the configured minimum and maximum minutes. Valid values are integers from 1 to 1440.
+
+The check uses an ephemeral, read-only `codex exec --json` invocation that ignores user config, rules, hooks, and Git repository checks. It extracts the last completed agent message as the result, does not create a normal AgentRadar session, and stops when AgentRadar exits. Optional success reminders reuse the existing completion reminder settings.
 
 ## Package DMG
 
