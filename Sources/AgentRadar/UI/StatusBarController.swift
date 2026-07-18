@@ -56,7 +56,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover: NSPopover
     private let minStatusAnimationTickInterval: TimeInterval = 0.08
-    private var currentBadgeText = ""
     private var eventMonitor: Any?
     private var resignObserver: Any?
     private var versionCancellable: AnyCancellable?
@@ -351,14 +350,13 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let activeCount = summary.activeCount
         let aggregateStatus = summary.aggregateStatus
         guard let button = statusItem.button else { return }
-        button.imagePosition = activeCount > 0 ? .imageLeading : .imageOnly
+        button.imagePosition = .imageOnly
         updateStatusImage(
             activeCount: activeCount,
             aggregateStatus: aggregateStatus,
             hasWaitingInActiveProject: summary.hasWaitingInActiveProject,
             button: button
         )
-        updateBadgeTitle(activeCount: activeCount, button: button)
     }
 
     private func updateStatusImage(activeCount: Int, aggregateStatus: SessionStatus, hasWaitingInActiveProject: Bool, button: NSStatusBarButton) {
@@ -396,27 +394,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             stopStatusImageFade()
             button.image = nextImage
         }
-    }
-
-    private func updateBadgeTitle(activeCount: Int, button: NSStatusBarButton) {
-        let nextText = activeCount > 0 ? badgeText(activeCount: activeCount) : ""
-        guard currentBadgeText != nextText else { return }
-        currentBadgeText = nextText
-        button.attributedTitle = badgeTitle(nextText)
-    }
-
-    private func badgeText(activeCount: Int) -> String {
-        activeCount > 9 ? "9+" : "\(activeCount)"
-    }
-
-    private func badgeTitle(_ text: String) -> NSAttributedString {
-        NSAttributedString(
-            string: text,
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
-                .foregroundColor: NSColor.labelColor
-            ]
-        )
     }
 
     private func makeStatusImage(activeCount: Int, aggregateStatus: SessionStatus, isErrorWaveActive: Bool, isCompletionFlashActive: Bool) -> NSImage {
@@ -574,6 +551,33 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
                 )
             }
         }
+
+        if activeCount > 0 {
+            drawActiveCount(activeCount, in: rect)
+        }
+    }
+
+    private func drawActiveCount(_ activeCount: Int, in rect: NSRect) {
+        let text = activeCount > 9 ? "9+" : "\(activeCount)"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold),
+            .foregroundColor: NSColor.white,
+            .shadow: {
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor.black.withAlphaComponent(0.7)
+                shadow.shadowBlurRadius = 1
+                shadow.shadowOffset = .zero
+                return shadow
+            }()
+        ]
+        let textSize = (text as NSString).size(withAttributes: attributes)
+        let textRect = NSRect(
+            x: rect.midX - textSize.width / 2,
+            y: rect.midY - textSize.height / 2,
+            width: textSize.width,
+            height: textSize.height
+        )
+        (text as NSString).draw(in: textRect, withAttributes: attributes)
     }
 
     private func startCompletionFlashAnimation() {
