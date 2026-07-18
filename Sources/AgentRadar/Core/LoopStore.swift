@@ -33,6 +33,45 @@ struct LoopRunResult: Equatable {
     }
 }
 
+struct CodexCommandContext {
+    static let executablePathPrefix = "__AGENTRADAR_CODEX_PATH__="
+    static let loginShellPathPrefix = "__AGENTRADAR_LOGIN_PATH__="
+
+    let executableURL: URL
+    let loginShellPath: String
+
+    init?(discoveryOutput: String) {
+        let lines = discoveryOutput
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard
+            let executableLine = lines.last(where: { $0.hasPrefix(Self.executablePathPrefix) }),
+            let loginShellPathLine = lines.last(where: { $0.hasPrefix(Self.loginShellPathPrefix) })
+        else {
+            return nil
+        }
+
+        let executablePath = String(executableLine.dropFirst(Self.executablePathPrefix.count))
+        let loginShellPath = String(loginShellPathLine.dropFirst(Self.loginShellPathPrefix.count))
+        guard
+            !loginShellPath.isEmpty,
+            FileManager.default.isExecutableFile(atPath: executablePath)
+        else {
+            return nil
+        }
+
+        self.executableURL = URL(fileURLWithPath: executablePath)
+        self.loginShellPath = loginShellPath
+    }
+
+    func executionEnvironment(base: [String: String]) -> [String: String] {
+        var environment = base
+        // 查找和执行必须复用同一 PATH，避免 GUI 进程缺少 NVM、pnpm 或 Homebrew 目录。
+        environment["PATH"] = loginShellPath
+        return environment
+    }
+}
+
 @MainActor
 final class LoopStore: ObservableObject {
     private enum DefaultsKey {
@@ -156,9 +195,9 @@ final class LoopStore: ObservableObject {
     }
 
     private func runLoop(range: LoopMinuteRange, runID: UUID) async {
-        let codexURL: URL
+        let codexContext: CodexCommandContext
         do {
-            codexURL = try await resolveCodexURL()
+            codexContext = try await resolveCodexContext()
         } catch {
             guard activeRunID == runID, !Task.isCancelled else {
                 finish(runID: runID)
@@ -186,7 +225,7 @@ final class LoopStore: ObservableObject {
 
             let startedAt = Date()
             phase = .running(count: count, startedAt: startedAt)
-            let outcome = await executeCodex(codexURL: codexURL, count: count, startedAt: startedAt)
+            let outcome = await executeCodex(context: codexContext, count: count, startedAt: startedAt)
             guard activeRunID == runID, !Task.isCancelled else { break }
 
             lastResult = outcome.result
@@ -205,10 +244,15 @@ final class LoopStore: ObservableObject {
         finish(runID: runID)
     }
 
-    private func resolveCodexURL() async throws -> URL {
+    private func resolveCodexContext() async throws -> CodexCommandContext {
+        let executablePrefix = CodexCommandContext.executablePathPrefix
+        let pathPrefix = CodexCommandContext.loginShellPathPrefix
         let execution = try await runProcess(
             executableURL: URL(fileURLWithPath: "/bin/zsh"),
-            arguments: ["-lic", "command -v codex"],
+            arguments: [
+                "-lic",
+                "codex_path=$(command -v codex) && printf '\\n\(executablePrefix)%s\\n\(pathPrefix)%s\\n' \"$codex_path\" \"$PATH\""
+            ],
             currentDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
             environment: ProcessInfo.processInfo.environment
         )
@@ -216,28 +260,16 @@ final class LoopStore: ObservableObject {
             throw LoopStoreError.codexNotFound
         }
 
-        let path = execution.standardOutput
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .last { $0.hasPrefix("/") }
-        guard
-            let path,
-            FileManager.default.isExecutableFile(atPath: path)
-        else {
+        guard let context = CodexCommandContext(discoveryOutput: execution.standardOutput) else {
             throw LoopStoreError.codexNotFound
         }
-        return URL(fileURLWithPath: path)
+        return context
     }
 
-    private func executeCodex(codexURL: URL, count: Int, startedAt: Date) async -> CodexExecutionOutcome {
+    private func executeCodex(context: CodexCommandContext, count: Int, startedAt: Date) async -> CodexExecutionOutcome {
         do {
-            var environment = ProcessInfo.processInfo.environment
-            let codexBinDirectory = codexURL.deletingLastPathComponent().path
-            let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-            environment["PATH"] = "\(codexBinDirectory):\(inheritedPath)"
-
             let execution = try await runProcess(
-                executableURL: codexURL,
+                executableURL: context.executableURL,
                 arguments: [
                     "exec",
                     "--json",
@@ -249,7 +281,7 @@ final class LoopStore: ObservableObject {
                     String(count)
                 ],
                 currentDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
-                environment: environment
+                environment: context.executionEnvironment(base: ProcessInfo.processInfo.environment)
             )
             let completedAt = Date()
             let rawMessage = LoopOutputParser.lastAgentMessage(in: execution.standardOutput)
