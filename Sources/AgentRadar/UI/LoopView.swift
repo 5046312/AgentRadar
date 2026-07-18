@@ -119,17 +119,40 @@ struct LoopView: View {
             .font(.system(size: 10))
             .foregroundStyle(.secondary)
 
+            // 发送内容固定占上方四分之一，剩余区域用于展示主要返回结果。
+            GeometryReader { geometry in
+                let spacing: CGFloat = 8
+                let availableHeight = max(0, geometry.size.height - spacing)
+
+                VStack(spacing: spacing) {
+                    resultContentPanel(title: "发送内容", text: String(result.count))
+                        .frame(height: availableHeight * 0.25)
+
+                    resultContentPanel(title: "返回内容", text: result.displayText)
+                        .frame(height: availableHeight * 0.75)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func resultContentPanel(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+
             ScrollView {
-                Text(result.displayText)
+                Text(text)
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
         }
+        .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder

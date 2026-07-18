@@ -77,6 +77,8 @@ final class LoopStore: ObservableObject {
     @Published private(set) var lastResult: LoopRunResult?
     @Published private(set) var errorMessage: String?
     @Published private(set) var latestSuccess: LoopSuccessNotice?
+    @Published private(set) var successCount = 0
+    @Published private(set) var failureCount = 0
 
     private let defaults: UserDefaults
     private var loopTask: Task<Void, Never>?
@@ -122,6 +124,8 @@ final class LoopStore: ObservableObject {
         lastResult = nil
         errorMessage = nil
         latestSuccess = nil
+        successCount = 0
+        failureCount = 0
         phase = .resolvingCodex
 
         let runID = UUID()
@@ -187,8 +191,13 @@ final class LoopStore: ObservableObject {
 
             lastResult = outcome.result
             errorMessage = nil
-            if outcome.result.succeeded, notifyOnSuccess, let message = outcome.notificationMessage {
-                latestSuccess = LoopSuccessNotice(count: count, message: message, duration: outcome.result.duration)
+            if outcome.result.succeeded {
+                successCount += 1
+                if notifyOnSuccess, let message = outcome.notificationMessage {
+                    latestSuccess = LoopSuccessNotice(count: count, message: message, duration: outcome.result.duration)
+                }
+            } else {
+                failureCount += 1
             }
             count += 1
         }

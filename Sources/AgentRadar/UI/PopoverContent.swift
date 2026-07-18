@@ -72,11 +72,23 @@ struct PopoverContent: View {
                         .foregroundStyle(.red)
                 }
                 Button(action: { showingLoop = true }) {
-                    Image(systemName: "testtube.2")
-                        .font(.system(size: 12, weight: .semibold))
+                    HStack(spacing: 3) {
+                        Image(systemName: "testtube.2")
+                            .font(.system(size: 12, weight: .semibold))
+
+                        VStack(spacing: -2) {
+                            Text("\(loopStore.successCount)")
+                                .foregroundStyle(.green)
+                            Text("\(loopStore.failureCount)")
+                                .foregroundStyle(.red)
+                        }
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                    }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(loopStore.isActive ? Color.green : Color.secondary)
+                .accessibilityLabel("Loop 测试，成功 \(loopStore.successCount)，失败 \(loopStore.failureCount)")
                 .help("Loop 可用性测试")
                 .popover(isPresented: $showingLoop, arrowEdge: .bottom) {
                     LoopView(store: loopStore)
