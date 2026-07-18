@@ -11,7 +11,7 @@ struct LoopView: View {
             Text("Loop 可用性测试")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("随机等待后调用一次精简 Codex；仅在 AgentRadar 运行期间循环。")
+            Text("首次立即调用，后续随机等待；仅在 AgentRadar 运行期间循环。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

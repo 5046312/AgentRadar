@@ -167,14 +167,16 @@ final class LoopStore: ObservableObject {
 
         var count = 1
         while activeRunID == runID, !Task.isCancelled {
-            let delayNanoseconds = range.randomDelayNanoseconds()
-            let delaySeconds = TimeInterval(delayNanoseconds) / 1_000_000_000
-            phase = .waiting(count: count, nextRunAt: Date().addingTimeInterval(delaySeconds))
+            if count > 1 {
+                let delayNanoseconds = range.randomDelayNanoseconds()
+                let delaySeconds = TimeInterval(delayNanoseconds) / 1_000_000_000
+                phase = .waiting(count: count, nextRunAt: Date().addingTimeInterval(delaySeconds))
 
-            do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
-            } catch {
-                break
+                do {
+                    try await Task.sleep(nanoseconds: delayNanoseconds)
+                } catch {
+                    break
+                }
             }
             guard activeRunID == runID, !Task.isCancelled else { break }
 
