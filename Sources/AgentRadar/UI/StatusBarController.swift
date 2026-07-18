@@ -560,8 +560,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func drawActiveCount(_ activeCount: Int, in rect: NSRect) {
         let text = activeCount > 9 ? "9+" : "\(activeCount)"
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold),
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold),
             .foregroundColor: NSColor.white,
+            .strokeColor: NSColor.black,
+            .strokeWidth: -1.5,
             .shadow: {
                 let shadow = NSShadow()
                 shadow.shadowColor = NSColor.black.withAlphaComponent(0.7)
