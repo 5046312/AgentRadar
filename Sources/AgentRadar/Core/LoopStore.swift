@@ -75,8 +75,12 @@ struct CodexCommandContext {
 @MainActor
 final class LoopStore: ObservableObject {
     private enum DefaultsKey {
-        static let minimumMinutes = "loopMinimumMinutes"
-        static let maximumMinutes = "loopMaximumMinutes"
+        static let successMinimumSeconds = "loopSuccessMinimumSeconds"
+        static let successMaximumSeconds = "loopSuccessMaximumSeconds"
+        static let failureMinimumSeconds = "loopFailureMinimumSeconds"
+        static let failureMaximumSeconds = "loopFailureMaximumSeconds"
+        static let legacyMinimumMinutes = "loopMinimumMinutes"
+        static let legacyMaximumMinutes = "loopMaximumMinutes"
         static let notifyOnSuccess = "loopNotifyOnSuccess"
     }
 
@@ -105,12 +109,16 @@ final class LoopStore: ObservableObject {
         let notificationMessage: String?
     }
 
-    static let defaultMinimumMinutes = 1
-    static let defaultMaximumMinutes = 5
+    static let defaultSuccessMinimumSeconds = 60
+    static let defaultSuccessMaximumSeconds = 300
+    static let defaultFailureMinimumSeconds = 60
+    static let defaultFailureMaximumSeconds = 300
     static let maximumDisplayedCharacters = 20_000
 
-    @Published private(set) var minimumMinutes: Int
-    @Published private(set) var maximumMinutes: Int
+    @Published private(set) var successMinimumSeconds: Int
+    @Published private(set) var successMaximumSeconds: Int
+    @Published private(set) var failureMinimumSeconds: Int
+    @Published private(set) var failureMaximumSeconds: Int
     @Published private(set) var notifyOnSuccess: Bool
     @Published private(set) var phase: LoopPhase = .idle
     @Published private(set) var lastResult: LoopRunResult?
@@ -129,16 +137,33 @@ final class LoopStore: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
-        let storedMinimum = defaults.object(forKey: DefaultsKey.minimumMinutes) == nil
-            ? Self.defaultMinimumMinutes
-            : defaults.integer(forKey: DefaultsKey.minimumMinutes)
-        let storedMaximum = defaults.object(forKey: DefaultsKey.maximumMinutes) == nil
-            ? Self.defaultMaximumMinutes
-            : defaults.integer(forKey: DefaultsKey.maximumMinutes)
-        let storedRange = LoopMinuteRange(minimum: storedMinimum, maximum: storedMaximum)
+        let successRange = Self.loadRange(
+            defaults: defaults,
+            minimumKey: DefaultsKey.successMinimumSeconds,
+            maximumKey: DefaultsKey.successMaximumSeconds,
+            fallback: LoopSecondRange(
+                minimum: Self.defaultSuccessMinimumSeconds,
+                maximum: Self.defaultSuccessMaximumSeconds
+            )!,
+            legacyMinimumKey: DefaultsKey.legacyMinimumMinutes,
+            legacyMaximumKey: DefaultsKey.legacyMaximumMinutes
+        )
+        let failureRange = Self.loadRange(
+            defaults: defaults,
+            minimumKey: DefaultsKey.failureMinimumSeconds,
+            maximumKey: DefaultsKey.failureMaximumSeconds,
+            fallback: LoopSecondRange(
+                minimum: Self.defaultFailureMinimumSeconds,
+                maximum: Self.defaultFailureMaximumSeconds
+            )!,
+            legacyMinimumKey: DefaultsKey.legacyMinimumMinutes,
+            legacyMaximumKey: DefaultsKey.legacyMaximumMinutes
+        )
 
-        minimumMinutes = storedRange?.minimum ?? Self.defaultMinimumMinutes
-        maximumMinutes = storedRange?.maximum ?? Self.defaultMaximumMinutes
+        successMinimumSeconds = successRange.minimum
+        successMaximumSeconds = successRange.maximum
+        failureMinimumSeconds = failureRange.minimum
+        failureMaximumSeconds = failureRange.maximum
         notifyOnSuccess = defaults.bool(forKey: DefaultsKey.notifyOnSuccess)
     }
 
@@ -146,11 +171,18 @@ final class LoopStore: ObservableObject {
         phase != .idle
     }
 
-    func setMinuteRange(_ range: LoopMinuteRange) {
-        minimumMinutes = range.minimum
-        maximumMinutes = range.maximum
-        defaults.set(range.minimum, forKey: DefaultsKey.minimumMinutes)
-        defaults.set(range.maximum, forKey: DefaultsKey.maximumMinutes)
+    func setSuccessSecondRange(_ range: LoopSecondRange) {
+        successMinimumSeconds = range.minimum
+        successMaximumSeconds = range.maximum
+        defaults.set(range.minimum, forKey: DefaultsKey.successMinimumSeconds)
+        defaults.set(range.maximum, forKey: DefaultsKey.successMaximumSeconds)
+    }
+
+    func setFailureSecondRange(_ range: LoopSecondRange) {
+        failureMinimumSeconds = range.minimum
+        failureMaximumSeconds = range.maximum
+        defaults.set(range.minimum, forKey: DefaultsKey.failureMinimumSeconds)
+        defaults.set(range.maximum, forKey: DefaultsKey.failureMaximumSeconds)
     }
 
     func setNotifyOnSuccess(_ enabled: Bool) {
@@ -166,10 +198,11 @@ final class LoopStore: ObservableObject {
         streakSucceeded = nil
     }
 
-    func start(range: LoopMinuteRange) {
+    func start(successRange: LoopSecondRange, failureRange: LoopSecondRange) {
         guard !isActive else { return }
 
-        setMinuteRange(range)
+        setSuccessSecondRange(successRange)
+        setFailureSecondRange(failureRange)
         lastResult = nil
         errorMessage = nil
         latestSuccess = nil
@@ -179,7 +212,7 @@ final class LoopStore: ObservableObject {
         let runID = UUID()
         activeRunID = runID
         loopTask = Task { [weak self] in
-            await self?.runLoop(range: range, runID: runID)
+            await self?.runLoop(successRange: successRange, failureRange: failureRange, runID: runID)
         }
     }
 
@@ -203,7 +236,7 @@ final class LoopStore: ObservableObject {
         phase = .idle
     }
 
-    private func runLoop(range: LoopMinuteRange, runID: UUID) async {
+    private func runLoop(successRange: LoopSecondRange, failureRange: LoopSecondRange, runID: UUID) async {
         let codexContext: CodexCommandContext
         do {
             codexContext = try await resolveCodexContext()
@@ -220,7 +253,9 @@ final class LoopStore: ObservableObject {
         var count = 1
         while activeRunID == runID, !Task.isCancelled {
             if count > 1 {
-                let delayNanoseconds = range.randomDelayNanoseconds()
+                // 上轮结果决定本轮等待范围；失败后单独配置可避免连续失败时仍沿用成功间隔。
+                let delayRange = streakSucceeded == false ? failureRange : successRange
+                let delayNanoseconds = delayRange.randomDelayNanoseconds()
                 let delaySeconds = TimeInterval(delayNanoseconds) / 1_000_000_000
                 phase = .waiting(count: count, nextRunAt: Date().addingTimeInterval(delaySeconds))
 
@@ -411,6 +446,28 @@ final class LoopStore: ObservableObject {
         loopTask = nil
         currentProcess = nil
         phase = .idle
+    }
+
+    private static func loadRange(
+        defaults: UserDefaults,
+        minimumKey: String,
+        maximumKey: String,
+        fallback: LoopSecondRange,
+        legacyMinimumKey: String,
+        legacyMaximumKey: String
+    ) -> LoopSecondRange {
+        let minimum = defaults.object(forKey: minimumKey).map { _ in
+            defaults.integer(forKey: minimumKey)
+        } ?? defaults.object(forKey: legacyMinimumKey).map { _ in
+            defaults.integer(forKey: legacyMinimumKey) * 60
+        } ?? fallback.minimum
+        let maximum = defaults.object(forKey: maximumKey).map { _ in
+            defaults.integer(forKey: maximumKey)
+        } ?? defaults.object(forKey: legacyMaximumKey).map { _ in
+            defaults.integer(forKey: legacyMaximumKey) * 60
+        } ?? fallback.maximum
+
+        return LoopSecondRange(minimum: minimum, maximum: maximum) ?? fallback
     }
 
     private static func trailingCharacters(_ text: String, limit: Int) -> String {

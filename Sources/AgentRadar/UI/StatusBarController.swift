@@ -43,6 +43,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let isErrorWaveActive: Bool
         let isLoopActive: Bool
         let loopSucceeded: Bool?
+        let loopRecoveryActive: Bool
     }
 
     // 状态栏矩阵统一使用 3x3，避免绘制和动画步进尺寸不一致。
@@ -78,6 +79,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var activeAnimationOffset = 0.0
     private var statusAnimationStep = 0
     private var loopAnimationAngle: CGFloat = 0
+    private var previousLoopSucceeded: Bool?
+    private var loopRecoveryActive = false
     private var statusAnimationCellTones = StatusBarController.initialRunningCellTones()
     private var ambientGridEffect = AmbientGridEffect.shimmer
     private var ambientGridEffectRemainingTicks = 0
@@ -173,8 +176,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         loopPhaseCancellable = loopStore.$phase.sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        loopResultCancellable = loopStore.$streakSucceeded.sink { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        loopResultCancellable = loopStore.$streakSucceeded.sink { [weak self] succeeded in
+            Task { @MainActor in
+                guard let self else { return }
+                // 失败后首次成功视为恢复态，用黄色短暂区分普通连续成功。
+                self.loopRecoveryActive = self.previousLoopSucceeded == false && succeeded == true
+                self.previousLoopSucceeded = succeeded
+                self.refresh()
+            }
         }
         refresh()
     }
@@ -392,7 +401,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             cellTones: statusAnimationCellTones,
             isErrorWaveActive: errorWaveActive,
             isLoopActive: loopStore.isActive,
-            loopSucceeded: loopStore.streakSucceeded
+            loopSucceeded: loopStore.streakSucceeded,
+            loopRecoveryActive: loopRecoveryActive
         )
         guard lastStatusRenderKey != nextKey else { return }
         let previousKey = lastStatusRenderKey
@@ -456,6 +466,9 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             && targetKey.aggregateStatus == nextKey.aggregateStatus
             && targetKey.hasWaitingInActiveProject == nextKey.hasWaitingInActiveProject
             && targetKey.isErrorWaveActive == nextKey.isErrorWaveActive
+            && targetKey.isLoopActive == nextKey.isLoopActive
+            && targetKey.loopSucceeded == nextKey.loopSucceeded
+            && targetKey.loopRecoveryActive == nextKey.loopRecoveryActive
     }
 
     private func startStatusImageFade(from startImage: NSImage, to endImage: NSImage, targetKey: StatusRenderKey, button: NSStatusBarButton) {
@@ -588,13 +601,17 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         path.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: loopAnimationAngle, endAngle: loopAnimationAngle + 285, clockwise: false)
         path.lineWidth = 2
         let ringColor: NSColor
-        switch loopStore.streakSucceeded {
-        case .some(true):
-            ringColor = .systemGreen
-        case .some(false):
-            ringColor = .systemRed
-        case .none:
-            ringColor = .secondaryLabelColor
+        if loopRecoveryActive {
+            ringColor = .systemYellow
+        } else {
+            switch loopStore.streakSucceeded {
+            case .some(true):
+                ringColor = .systemGreen
+            case .some(false):
+                ringColor = .systemRed
+            case .none:
+                ringColor = .secondaryLabelColor
+            }
         }
 
         // 独立角度保证圆环不受九宫格动画重置影响；同色阴影增强小尺寸状态栏中的轮廓。

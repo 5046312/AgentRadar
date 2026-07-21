@@ -94,7 +94,7 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 ## Loop Availability Test
 
-Click the test-tube button in the main popover to open the independent Loop panel. The first Codex check runs immediately; later checks wait for a new random interval between the configured minimum and maximum minutes. Valid values are integers from 1 to 1440.
+Click the test-tube button in the main popover to open the independent Loop panel. The first Codex check runs immediately; later checks randomly wait within the success or failure minimum/maximum seconds configured for the previous result. Valid values are integers from 1 to 86400.
 
 The check uses the current Codex user config in an ephemeral, read-only `codex exec --json` invocation while ignoring rules, hooks, and Git repository checks. It extracts the last completed agent message as the result, shows the sent value in the top quarter of the result panel, and displays success/failure counts beside the test-tube button. It does not create a normal AgentRadar session and stops when AgentRadar exits. Optional success reminders reuse the existing completion reminder settings.
 

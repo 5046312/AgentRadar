@@ -3,15 +3,17 @@ import SwiftUI
 
 struct LoopView: View {
     @ObservedObject var store: LoopStore
-    @State private var minimumText = ""
-    @State private var maximumText = ""
+    @State private var successMinimumText = ""
+    @State private var successMaximumText = ""
+    @State private var failureMinimumText = ""
+    @State private var failureMaximumText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Loop 可用性测试")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("首次立即调用，后续随机等待；仅在 AgentRadar 运行期间循环。")
+            Text("首次立即调用，后续按上次结果随机等待；仅在 AgentRadar 运行期间循环。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -37,11 +39,11 @@ struct LoopView: View {
 
             HStack(spacing: 10) {
                 Button("启动") {
-                    guard let minuteRange else { return }
-                    store.start(range: minuteRange)
+                    guard let successSecondRange, let failureSecondRange else { return }
+                    store.start(successRange: successSecondRange, failureRange: failureSecondRange)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(store.isActive || minuteRange == nil)
+                .disabled(store.isActive || successSecondRange == nil || failureSecondRange == nil)
 
                 Button("停止") {
                     store.stop()
@@ -73,17 +75,35 @@ struct LoopView: View {
         .frame(width: 380, height: 420, alignment: .topLeading)
         .focusEffectDisabled()
         .onAppear {
-            minimumText = String(store.minimumMinutes)
-            maximumText = String(store.maximumMinutes)
+            successMinimumText = String(store.successMinimumSeconds)
+            successMaximumText = String(store.successMaximumSeconds)
+            failureMinimumText = String(store.failureMinimumSeconds)
+            failureMaximumText = String(store.failureMaximumSeconds)
         }
     }
 
     private var intervalSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            intervalRow(
+                title: "成功后间隔",
+                minimum: successMinimumTextBinding,
+                maximum: successMaximumTextBinding
+            )
+            intervalRow(
+                title: "失败后间隔",
+                minimum: failureMinimumTextBinding,
+                maximum: failureMaximumTextBinding
+            )
+        }
+    }
+
+    private func intervalRow(title: String, minimum: Binding<String>, maximum: Binding<String>) -> some View {
         HStack(spacing: 8) {
-            Text("随机间隔")
+            Text(title)
                 .font(.system(size: 11, weight: .medium))
+                .frame(width: 76, alignment: .leading)
             Spacer()
-            TextField("1", text: minimumTextBinding)
+            TextField("60", text: minimum)
                 .font(.system(size: 11, design: .monospaced))
                 .multilineTextAlignment(.trailing)
                 .frame(width: 54)
@@ -91,12 +111,12 @@ struct LoopView: View {
             Text("至")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            TextField("5", text: maximumTextBinding)
+            TextField("300", text: maximum)
                 .font(.system(size: 11, design: .monospaced))
                 .multilineTextAlignment(.trailing)
                 .frame(width: 54)
                 .disabled(store.isActive)
-            Text("分钟")
+            Text("秒")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -183,44 +203,88 @@ struct LoopView: View {
         }
     }
 
-    private var minuteRange: LoopMinuteRange? {
-        guard let minimum = Int(minimumText), let maximum = Int(maximumText) else {
+    private var successSecondRange: LoopSecondRange? {
+        guard let minimum = Int(successMinimumText), let maximum = Int(successMaximumText) else {
             return nil
         }
-        return LoopMinuteRange(minimum: minimum, maximum: maximum)
+        return LoopSecondRange(minimum: minimum, maximum: maximum)
+    }
+
+    private var failureSecondRange: LoopSecondRange? {
+        guard let minimum = Int(failureMinimumText), let maximum = Int(failureMaximumText) else {
+            return nil
+        }
+        return LoopSecondRange(minimum: minimum, maximum: maximum)
     }
 
     private var validationMessage: String? {
-        guard let minimum = Int(minimumText), let maximum = Int(maximumText) else {
-            return "请输入 1 到 1440 的整数分钟。"
+        if let message = rangeValidationMessage(
+            label: "成功后间隔",
+            minimumText: successMinimumText,
+            maximumText: successMaximumText
+        ) {
+            return message
         }
-        guard LoopMinuteRange.allowedMinutes.contains(minimum), LoopMinuteRange.allowedMinutes.contains(maximum) else {
-            return "分钟范围必须在 1 到 1440 之间。"
+        return rangeValidationMessage(
+            label: "失败后间隔",
+            minimumText: failureMinimumText,
+            maximumText: failureMaximumText
+        )
+    }
+
+    private func rangeValidationMessage(label: String, minimumText: String, maximumText: String) -> String? {
+        guard let minimum = Int(minimumText), let maximum = Int(maximumText) else {
+            return "\(label)请输入 1 到 86400 的整数秒。"
+        }
+        guard LoopSecondRange.allowedSeconds.contains(minimum), LoopSecondRange.allowedSeconds.contains(maximum) else {
+            return "\(label)范围必须在 1 到 86400 秒之间。"
         }
         guard minimum <= maximum else {
-            return "最小分钟不能大于最大分钟。"
+            return "\(label)最小值不能大于最大值。"
         }
         return nil
     }
 
-    private var minimumTextBinding: Binding<String> {
+    private var successMinimumTextBinding: Binding<String> {
         Binding(
-            get: { minimumText },
+            get: { successMinimumText },
             set: { newValue in
                 let filtered = numericText(from: newValue)
-                minimumText = filtered
-                persistValidRange(minimumText: filtered, maximumText: maximumText)
+                successMinimumText = filtered
+                persistValidSuccessRange(minimumText: filtered, maximumText: successMaximumText)
             }
         )
     }
 
-    private var maximumTextBinding: Binding<String> {
+    private var successMaximumTextBinding: Binding<String> {
         Binding(
-            get: { maximumText },
+            get: { successMaximumText },
             set: { newValue in
                 let filtered = numericText(from: newValue)
-                maximumText = filtered
-                persistValidRange(minimumText: minimumText, maximumText: filtered)
+                successMaximumText = filtered
+                persistValidSuccessRange(minimumText: successMinimumText, maximumText: filtered)
+            }
+        )
+    }
+
+    private var failureMinimumTextBinding: Binding<String> {
+        Binding(
+            get: { failureMinimumText },
+            set: { newValue in
+                let filtered = numericText(from: newValue)
+                failureMinimumText = filtered
+                persistValidFailureRange(minimumText: filtered, maximumText: failureMaximumText)
+            }
+        )
+    }
+
+    private var failureMaximumTextBinding: Binding<String> {
+        Binding(
+            get: { failureMaximumText },
+            set: { newValue in
+                let filtered = numericText(from: newValue)
+                failureMaximumText = filtered
+                persistValidFailureRange(minimumText: failureMinimumText, maximumText: filtered)
             }
         )
     }
@@ -232,17 +296,29 @@ struct LoopView: View {
         )
     }
 
-    private func persistValidRange(minimumText: String, maximumText: String) {
+    private func persistValidSuccessRange(minimumText: String, maximumText: String) {
         guard
             let minimum = Int(minimumText),
             let maximum = Int(maximumText),
-            let range = LoopMinuteRange(minimum: minimum, maximum: maximum)
+            let range = LoopSecondRange(minimum: minimum, maximum: maximum)
         else {
             return
         }
 
         // 输入过程中允许暂时为空；只把完整合法区间写入 UserDefaults。
-        store.setMinuteRange(range)
+        store.setSuccessSecondRange(range)
+    }
+
+    private func persistValidFailureRange(minimumText: String, maximumText: String) {
+        guard
+            let minimum = Int(minimumText),
+            let maximum = Int(maximumText),
+            let range = LoopSecondRange(minimum: minimum, maximum: maximum)
+        else {
+            return
+        }
+
+        store.setFailureSecondRange(range)
     }
 
     private func numericText(from value: String) -> String {
