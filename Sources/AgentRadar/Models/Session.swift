@@ -70,11 +70,13 @@ struct CompletionNotice: Identifiable, Equatable {
 
 struct LoopSuccessNotice: Identifiable, Equatable {
     let id = UUID()
+    let channelName: String
     let count: Int
     let message: String
     let duration: TimeInterval
 
-    init(count: Int, message: String, duration: TimeInterval) {
+    init(channelName: String, count: Int, message: String, duration: TimeInterval) {
+        self.channelName = channelName
         self.count = count
         // 通知只展示结果开头，提前截断可避免完整长回复常驻通知状态。
         self.message = String(message.prefix(500))
@@ -127,7 +129,7 @@ extension CompletionNotice {
 
 extension LoopSuccessNotice {
     var titleText: String {
-        "Loop #\(count) 调用成功"
+        "\(channelName) Loop #\(count) 恢复成功"
     }
 
     var notificationBodyText: String {

@@ -76,15 +76,15 @@ struct PopoverContent: View {
                         Image(systemName: "testtube.2")
                             .font(.system(size: 12, weight: .semibold))
 
-                        Text("\(loopStore.streakCount)")
-                            .foregroundStyle(loopStore.streakSucceeded == true ? Color.green : loopStore.streakSucceeded == false ? Color.red : Color.secondary)
+                        Text("\(loopStore.activeChannelCount)")
+                            .foregroundStyle(loopStatusColor)
                             .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .monospacedDigit()
+                            .monospacedDigit()
                     }
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(loopStore.isActive ? Color.green : Color.secondary)
-                .accessibilityLabel("Loop 测试，最近连续\(loopStore.streakSucceeded == true ? "成功" : loopStore.streakSucceeded == false ? "失败" : "结果") \(loopStore.streakCount) 次")
+                .foregroundStyle(loopStore.isActive ? loopStatusColor : Color.secondary)
+                .accessibilityLabel("Loop 测试，\(loopStore.activeChannelCount) 个渠道运行中，状态\(loopStatusLabel)")
                 .help("Loop 可用性测试")
                 .popover(isPresented: $showingLoop, arrowEdge: .bottom) {
                     LoopView(store: loopStore)
@@ -127,6 +127,25 @@ struct PopoverContent: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var loopStatusColor: Color {
+        switch loopStore.aggregateStatus {
+        case .success: return .green
+        case .failure: return .red
+        case .recovered: return .yellow
+        case .inactive, .pending: return .secondary
+        }
+    }
+
+    private var loopStatusLabel: String {
+        switch loopStore.aggregateStatus {
+        case .inactive: return "未启动"
+        case .pending: return "等待结果"
+        case .success: return "成功"
+        case .failure: return "失败"
+        case .recovered: return "恢复成功"
+        }
     }
 
     private var emptyView: some View {

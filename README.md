@@ -17,7 +17,7 @@ AgentRadar is a native macOS menu bar app for monitoring Claude Code and Codex p
 - Completion, failure, and confirmation-waiting reminders via status bar bubble or system notification.
 - Status bar bubbles auto-size to content. Completion reminders include duration.
 - In-app hook installer with diff preview before writing.
-- Built-in Codex loop availability test with randomized follow-up intervals and last-result display.
+- Built-in Codex loop availability test with parallel channels, independent status, and shared randomized intervals.
 - Native Swift/AppKit/SwiftUI app. No `jq` or third-party runtime dependency.
 
 ## Status Detection
@@ -94,9 +94,9 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 ## Loop Availability Test
 
-Click the test-tube button in the main popover to open the independent Loop panel. The first Codex check runs immediately; later checks randomly wait within the success or failure minimum/maximum seconds configured for the previous result. Valid values are integers from 1 to 86400.
+Click the test-tube button in the main popover to open the independent Loop panel. The panel supports multiple named channels, each with its own base URL and API key. Clicking a channel row starts or stops it independently. Running channels execute in parallel; each start runs its first check immediately, then waits within the shared success or failure interval selected from that channel's previous result.
 
-The check uses the current Codex user config in an ephemeral, read-only `codex exec --json` invocation while ignoring rules, hooks, and Git repository checks. It extracts the last completed agent message as the result, shows the sent value in the top quarter of the result panel, and displays success/failure counts beside the test-tube button. It does not create a normal AgentRadar session and stops when AgentRadar exits. Optional success reminders reuse the existing completion reminder settings.
+Each channel invokes `codex exec --json` through a temporary custom provider in read-only mode. Requests use the Responses API over HTTPS with WebSockets disabled and do not modify the user's Codex configuration. API keys are not revealed again after saving. AgentRadar shows per-channel state, success/failure counts, and the latest result, and only sends a channel-named notification when a failed channel recovers. Loop checks do not create normal AgentRadar sessions, and all channels stop when AgentRadar exits.
 
 ## Package DMG
 

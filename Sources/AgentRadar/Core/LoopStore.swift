@@ -79,9 +79,9 @@ final class LoopStore: ObservableObject {
         static let successMaximumSeconds = "loopSuccessMaximumSeconds"
         static let failureMinimumSeconds = "loopFailureMinimumSeconds"
         static let failureMaximumSeconds = "loopFailureMaximumSeconds"
+        static let channels = "loopChannels"
         static let legacyMinimumMinutes = "loopMinimumMinutes"
         static let legacyMaximumMinutes = "loopMaximumMinutes"
-        static let notifyOnSuccess = "loopNotifyOnSuccess"
     }
 
     private enum LoopStoreError: LocalizedError {
@@ -106,7 +106,6 @@ final class LoopStore: ObservableObject {
 
     private struct CodexExecutionOutcome {
         let result: LoopRunResult
-        let notificationMessage: String?
     }
 
     static let defaultSuccessMinimumSeconds = 60
@@ -119,20 +118,13 @@ final class LoopStore: ObservableObject {
     @Published private(set) var successMaximumSeconds: Int
     @Published private(set) var failureMinimumSeconds: Int
     @Published private(set) var failureMaximumSeconds: Int
-    @Published private(set) var notifyOnSuccess: Bool
-    @Published private(set) var phase: LoopPhase = .idle
-    @Published private(set) var lastResult: LoopRunResult?
-    @Published private(set) var errorMessage: String?
+    @Published private(set) var channels: [LoopChannel]
     @Published private(set) var latestSuccess: LoopSuccessNotice?
-    @Published private(set) var successCount = 0
-    @Published private(set) var failureCount = 0
-    @Published private(set) var streakCount = 0
-    @Published private(set) var streakSucceeded: Bool?
 
     private let defaults: UserDefaults
-    private var loopTask: Task<Void, Never>?
-    private var activeRunID: UUID?
-    private var currentProcess: Process?
+    private var channelTasks: [UUID: Task<Void, Never>] = [:]
+    private var activeRunIDs: [UUID: UUID] = [:]
+    private var currentProcesses: [UUID: Process] = [:]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -164,11 +156,27 @@ final class LoopStore: ObservableObject {
         successMaximumSeconds = successRange.maximum
         failureMinimumSeconds = failureRange.minimum
         failureMaximumSeconds = failureRange.maximum
-        notifyOnSuccess = defaults.bool(forKey: DefaultsKey.notifyOnSuccess)
+        channels = Self.loadChannels(defaults: defaults)
     }
 
     var isActive: Bool {
-        phase != .idle
+        channels.contains(where: { $0.isActive })
+    }
+
+    var aggregateStatus: LoopAggregateStatus {
+        LoopAggregateStatus.resolve(channels)
+    }
+
+    var activeChannelCount: Int {
+        channels.filter { $0.isActive }.count
+    }
+
+    private var successRange: LoopSecondRange {
+        LoopSecondRange(minimum: successMinimumSeconds, maximum: successMaximumSeconds)!
+    }
+
+    private var failureRange: LoopSecondRange {
+        LoopSecondRange(minimum: failureMinimumSeconds, maximum: failureMaximumSeconds)!
     }
 
     func setSuccessSecondRange(_ range: LoopSecondRange) {
@@ -185,79 +193,131 @@ final class LoopStore: ObservableObject {
         defaults.set(range.maximum, forKey: DefaultsKey.failureMaximumSeconds)
     }
 
-    func setNotifyOnSuccess(_ enabled: Bool) {
-        notifyOnSuccess = enabled
-        defaults.set(enabled, forKey: DefaultsKey.notifyOnSuccess)
+    @discardableResult
+    func addChannel(name: String, baseURL: String, apiKey: String) throws -> UUID {
+        let configuration = try LoopChannelConfiguration(name: name, baseURL: baseURL, apiKey: apiKey)
+        guard !hasChannel(named: configuration.name, excluding: nil) else {
+            throw LoopChannelStoreError.duplicateName
+        }
+        channels.append(LoopChannel(configuration: configuration))
+        persistChannels()
+        return configuration.id
+    }
+
+    func updateChannel(id: UUID, name: String, baseURL: String, apiKey: String?) throws {
+        guard let index = channels.firstIndex(where: { $0.id == id }) else {
+            throw LoopChannelStoreError.channelNotFound
+        }
+        guard !channels[index].isActive else {
+            throw LoopChannelStoreError.channelRunning
+        }
+        let storedAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveAPIKey = storedAPIKey.flatMap { $0.isEmpty ? nil : $0 } ?? channels[index].apiKey
+        let configuration = try LoopChannelConfiguration(
+            id: id,
+            name: name,
+            baseURL: baseURL,
+            apiKey: effectiveAPIKey
+        )
+        guard !hasChannel(named: configuration.name, excluding: id) else {
+            throw LoopChannelStoreError.duplicateName
+        }
+        channels[index].configuration = configuration
+        persistChannels()
+    }
+
+    func deleteChannel(id: UUID) throws {
+        guard let index = channels.firstIndex(where: { $0.id == id }) else {
+            throw LoopChannelStoreError.channelNotFound
+        }
+        guard !channels[index].isActive else {
+            throw LoopChannelStoreError.channelRunning
+        }
+        channels.remove(at: index)
+        persistChannels()
     }
 
     func resetStatistics() {
-        // 仅清零累计结果，保留当前运行状态和最近一次调用详情。
-        successCount = 0
-        failureCount = 0
-        streakCount = 0
-        streakSucceeded = nil
-    }
-
-    func start(successRange: LoopSecondRange, failureRange: LoopSecondRange) {
-        guard !isActive else { return }
-
-        setSuccessSecondRange(successRange)
-        setFailureSecondRange(failureRange)
-        lastResult = nil
-        errorMessage = nil
-        latestSuccess = nil
-        resetStatistics()
-        phase = .resolvingCodex
-
-        let runID = UUID()
-        activeRunID = runID
-        loopTask = Task { [weak self] in
-            await self?.runLoop(successRange: successRange, failureRange: failureRange, runID: runID)
+        // 仅清零累计结果，保留各渠道运行阶段和最近一次调用详情。
+        for index in channels.indices {
+            channels[index].successCount = 0
+            channels[index].failureCount = 0
+            channels[index].streakCount = 0
+            channels[index].streakSucceeded = nil
+            channels[index].recoveredFromFailure = false
         }
     }
 
-    func stop() {
-        guard isActive else { return }
-        phase = .stopping
-        loopTask?.cancel()
-        terminateCurrentProcess()
+    func toggleChannel(id: UUID) {
+        guard let channel = channel(id: id) else { return }
+        channel.isActive ? stopChannel(id: id) : startChannel(id: id)
+    }
+
+    func startChannel(id: UUID) {
+        guard let index = channels.firstIndex(where: { $0.id == id }), !channels[index].isActive else {
+            return
+        }
+        channels[index].phase = .resolvingCodex
+        channels[index].errorMessage = nil
+
+        let runID = UUID()
+        activeRunIDs[id] = runID
+        channelTasks[id] = Task { [weak self] in
+            await self?.runLoop(channelID: id, runID: runID)
+        }
+    }
+
+    func stopChannel(id: UUID) {
+        guard let index = channels.firstIndex(where: { $0.id == id }), channels[index].isActive else {
+            return
+        }
+        channels[index].phase = .stopping
+        channelTasks[id]?.cancel()
+        terminateCurrentProcess(channelID: id)
     }
 
     func stopForApplicationTermination() {
-        loopTask?.cancel()
-        loopTask = nil
-        activeRunID = nil
-
+        channelTasks.values.forEach { $0.cancel() }
+        channelTasks.removeAll()
+        activeRunIDs.removeAll()
         // App 即将退出时没有时间等待 SIGTERM fallback，直接结束自己启动的 Codex 子进程。
-        if let process = currentProcess, process.isRunning {
+        for process in currentProcesses.values where process.isRunning {
             kill(process.processIdentifier, SIGKILL)
         }
-        currentProcess = nil
-        phase = .idle
+        currentProcesses.removeAll()
+        for index in channels.indices {
+            channels[index].phase = .idle
+        }
     }
 
-    private func runLoop(successRange: LoopSecondRange, failureRange: LoopSecondRange, runID: UUID) async {
+    private func runLoop(channelID: UUID, runID: UUID) async {
         let codexContext: CodexCommandContext
         do {
-            codexContext = try await resolveCodexContext()
+            codexContext = try await resolveCodexContext(channelID: channelID)
         } catch {
-            guard activeRunID == runID, !Task.isCancelled else {
-                finish(runID: runID)
+            guard isCurrentRun(channelID: channelID, runID: runID), !Task.isCancelled else {
+                finish(channelID: channelID, runID: runID)
                 return
             }
-            errorMessage = error.localizedDescription
-            finish(runID: runID)
+            updateChannel(id: channelID) { channel in
+                channel.errorMessage = error.localizedDescription
+            }
+            finish(channelID: channelID, runID: runID)
             return
         }
 
-        var count = 1
-        while activeRunID == runID, !Task.isCancelled {
-            if count > 1 {
-                // 上轮结果决定本轮等待范围；失败后单独配置可避免连续失败时仍沿用成功间隔。
-                let delayRange = streakSucceeded == false ? failureRange : successRange
+        var shouldWait = false
+        while isCurrentRun(channelID: channelID, runID: runID), !Task.isCancelled {
+            guard let currentChannel = channel(id: channelID) else { break }
+            let count = currentChannel.nextRunCount
+            if shouldWait {
+                // 各渠道按自身上轮结果选统一间隔；每轮读取最新配置，允许运行中调整。
+                let delayRange = currentChannel.streakSucceeded == false ? failureRange : successRange
                 let delayNanoseconds = delayRange.randomDelayNanoseconds()
                 let delaySeconds = TimeInterval(delayNanoseconds) / 1_000_000_000
-                phase = .waiting(count: count, nextRunAt: Date().addingTimeInterval(delaySeconds))
+                updateChannel(id: channelID) { channel in
+                    channel.phase = .waiting(count: count, nextRunAt: Date().addingTimeInterval(delaySeconds))
+                }
 
                 do {
                     try await Task.sleep(nanoseconds: delayNanoseconds)
@@ -265,34 +325,34 @@ final class LoopStore: ObservableObject {
                     break
                 }
             }
-            guard activeRunID == runID, !Task.isCancelled else { break }
+            guard
+                isCurrentRun(channelID: channelID, runID: runID),
+                !Task.isCancelled,
+                let configuration = channel(id: channelID)?.configuration
+            else {
+                break
+            }
 
             let startedAt = Date()
-            phase = .running(count: count, startedAt: startedAt)
-            let outcome = await executeCodex(context: codexContext, count: count, startedAt: startedAt)
-            guard activeRunID == runID, !Task.isCancelled else { break }
-
-            lastResult = outcome.result
-            errorMessage = nil
-            if outcome.result.succeeded {
-                successCount += 1
-                streakCount = streakSucceeded == true ? streakCount + 1 : 1
-                streakSucceeded = true
-                if notifyOnSuccess, let message = outcome.notificationMessage {
-                    latestSuccess = LoopSuccessNotice(count: count, message: message, duration: outcome.result.duration)
-                }
-            } else {
-                failureCount += 1
-                streakCount = streakSucceeded == false ? streakCount + 1 : 1
-                streakSucceeded = false
+            updateChannel(id: channelID) { channel in
+                channel.phase = .running(count: count, startedAt: startedAt)
             }
-            count += 1
+            let outcome = await executeCodex(
+                context: codexContext,
+                configuration: configuration,
+                channelID: channelID,
+                count: count,
+                startedAt: startedAt
+            )
+            guard isCurrentRun(channelID: channelID, runID: runID), !Task.isCancelled else { break }
+            apply(outcome: outcome, channelID: channelID)
+            shouldWait = true
         }
 
-        finish(runID: runID)
+        finish(channelID: channelID, runID: runID)
     }
 
-    private func resolveCodexContext() async throws -> CodexCommandContext {
+    private func resolveCodexContext(channelID: UUID) async throws -> CodexCommandContext {
         let executablePrefix = CodexCommandContext.executablePathPrefix
         let pathPrefix = CodexCommandContext.loginShellPathPrefix
         let execution = try await runProcess(
@@ -302,7 +362,8 @@ final class LoopStore: ObservableObject {
                 "codex_path=$(command -v codex) && printf '\\n\(executablePrefix)%s\\n\(pathPrefix)%s\\n' \"$codex_path\" \"$PATH\""
             ],
             currentDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            channelID: channelID
         )
         guard execution.terminationStatus == EXIT_SUCCESS else {
             throw LoopStoreError.codexNotFound
@@ -314,12 +375,20 @@ final class LoopStore: ObservableObject {
         return context
     }
 
-    private func executeCodex(context: CodexCommandContext, count: Int, startedAt: Date) async -> CodexExecutionOutcome {
+    private func executeCodex(
+        context: CodexCommandContext,
+        configuration: LoopChannelConfiguration,
+        channelID: UUID,
+        count: Int,
+        startedAt: Date
+    ) async -> CodexExecutionOutcome {
         do {
+            let configurationArguments = configuration.codexConfigurationOverrides.flatMap { ["-c", $0] }
+            var environment = context.executionEnvironment(base: ProcessInfo.processInfo.environment)
+            environment[LoopChannelConfiguration.apiKeyEnvironmentName] = configuration.apiKey
             let execution = try await runProcess(
                 executableURL: context.executableURL,
-                arguments: [
-                    "exec",
+                arguments: ["exec"] + configurationArguments + [
                     "--json",
                     "--ephemeral",
                     "--ignore-rules",
@@ -329,7 +398,8 @@ final class LoopStore: ObservableObject {
                     String(count)
                 ],
                 currentDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
-                environment: context.executionEnvironment(base: ProcessInfo.processInfo.environment)
+                environment: environment,
+                channelID: channelID
             )
             let completedAt = Date()
             let rawMessage = LoopOutputParser.lastAgentMessage(in: execution.standardOutput)
@@ -337,32 +407,26 @@ final class LoopStore: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .nonEmpty
 
-            return CodexExecutionOutcome(
-                result: LoopRunResult(
-                    count: count,
-                    completedAt: completedAt,
-                    duration: completedAt.timeIntervalSince(startedAt),
-                    terminationStatus: execution.terminationStatus,
-                    message: message.map { Self.trailingCharacters($0, limit: Self.maximumDisplayedCharacters) },
-                    errorText: message == nil
-                        ? Self.trailingCharacters(execution.standardError, limit: Self.maximumDisplayedCharacters)
-                        : nil
-                ),
-                notificationMessage: message
-            )
+            return CodexExecutionOutcome(result: LoopRunResult(
+                count: count,
+                completedAt: completedAt,
+                duration: completedAt.timeIntervalSince(startedAt),
+                terminationStatus: execution.terminationStatus,
+                message: message.map { Self.trailingCharacters($0, limit: Self.maximumDisplayedCharacters) },
+                errorText: message == nil
+                    ? Self.trailingCharacters(execution.standardError, limit: Self.maximumDisplayedCharacters)
+                    : nil
+            ))
         } catch {
             let completedAt = Date()
-            return CodexExecutionOutcome(
-                result: LoopRunResult(
-                    count: count,
-                    completedAt: completedAt,
-                    duration: completedAt.timeIntervalSince(startedAt),
-                    terminationStatus: nil,
-                    message: nil,
-                    errorText: Self.trailingCharacters(error.localizedDescription, limit: Self.maximumDisplayedCharacters)
-                ),
-                notificationMessage: nil
-            )
+            return CodexExecutionOutcome(result: LoopRunResult(
+                count: count,
+                completedAt: completedAt,
+                duration: completedAt.timeIntervalSince(startedAt),
+                terminationStatus: nil,
+                message: nil,
+                errorText: Self.trailingCharacters(error.localizedDescription, limit: Self.maximumDisplayedCharacters)
+            ))
         }
     }
 
@@ -370,7 +434,8 @@ final class LoopStore: ObservableObject {
         executableURL: URL,
         arguments: [String],
         currentDirectoryURL: URL,
-        environment: [String: String]
+        environment: [String: String],
+        channelID: UUID
     ) async throws -> ProcessExecution {
         let fileManager = FileManager.default
         let outputURL = fileManager.temporaryDirectory.appendingPathComponent("AgentRadar-Loop-\(UUID().uuidString).stdout")
@@ -408,14 +473,14 @@ final class LoopStore: ObservableObject {
             }
             do {
                 try process.run()
-                currentProcess = process
+                currentProcesses[channelID] = process
             } catch {
                 process.terminationHandler = nil
                 continuation.resume(throwing: error)
             }
         }
-        if currentProcess === process {
-            currentProcess = nil
+        if currentProcesses[channelID] === process {
+            currentProcesses[channelID] = nil
         }
 
         try outputHandle.synchronize()
@@ -427,8 +492,49 @@ final class LoopStore: ObservableObject {
         )
     }
 
-    private func terminateCurrentProcess() {
-        guard let process = currentProcess, process.isRunning else { return }
+    private func apply(outcome: CodexExecutionOutcome, channelID: UUID) {
+        guard let index = channels.firstIndex(where: { $0.id == channelID }) else { return }
+        let previouslySucceeded = channels[index].streakSucceeded
+        channels[index].lastResult = outcome.result
+        channels[index].errorMessage = nil
+        channels[index].nextRunCount += 1
+
+        if outcome.result.succeeded {
+            channels[index].successCount += 1
+            channels[index].streakCount = previouslySucceeded == true ? channels[index].streakCount + 1 : 1
+            channels[index].streakSucceeded = true
+            channels[index].recoveredFromFailure = previouslySucceeded == false
+            if channels[index].recoveredFromFailure, let message = outcome.result.message {
+                latestSuccess = LoopSuccessNotice(
+                    channelName: channels[index].name,
+                    count: outcome.result.count,
+                    message: message,
+                    duration: outcome.result.duration
+                )
+            }
+        } else {
+            channels[index].failureCount += 1
+            channels[index].streakCount = previouslySucceeded == false ? channels[index].streakCount + 1 : 1
+            channels[index].streakSucceeded = false
+            channels[index].recoveredFromFailure = false
+        }
+    }
+
+    private func channel(id: UUID) -> LoopChannel? {
+        channels.first(where: { $0.id == id })
+    }
+
+    private func updateChannel(id: UUID, _ update: (inout LoopChannel) -> Void) {
+        guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
+        update(&channels[index])
+    }
+
+    private func isCurrentRun(channelID: UUID, runID: UUID) -> Bool {
+        activeRunIDs[channelID] == runID
+    }
+
+    private func terminateCurrentProcess(channelID: UUID) {
+        guard let process = currentProcesses[channelID], process.isRunning else { return }
         process.terminate()
         let processID = process.processIdentifier
 
@@ -440,12 +546,14 @@ final class LoopStore: ObservableObject {
         }
     }
 
-    private func finish(runID: UUID) {
-        guard activeRunID == runID else { return }
-        activeRunID = nil
-        loopTask = nil
-        currentProcess = nil
-        phase = .idle
+    private func finish(channelID: UUID, runID: UUID) {
+        guard isCurrentRun(channelID: channelID, runID: runID) else { return }
+        activeRunIDs[channelID] = nil
+        channelTasks[channelID] = nil
+        currentProcesses[channelID] = nil
+        updateChannel(id: channelID) { channel in
+            channel.phase = .idle
+        }
     }
 
     private static func loadRange(
@@ -468,6 +576,29 @@ final class LoopStore: ObservableObject {
         } ?? fallback.maximum
 
         return LoopSecondRange(minimum: minimum, maximum: maximum) ?? fallback
+    }
+
+    private func hasChannel(named name: String, excluding excludedID: UUID?) -> Bool {
+        channels.contains { channel in
+            channel.id != excludedID
+                && channel.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    private func persistChannels() {
+        let configurations = channels.map(\.configuration)
+        guard let data = try? JSONEncoder().encode(configurations) else { return }
+        defaults.set(data, forKey: DefaultsKey.channels)
+    }
+
+    private static func loadChannels(defaults: UserDefaults) -> [LoopChannel] {
+        guard
+            let data = defaults.data(forKey: DefaultsKey.channels),
+            let configurations = try? JSONDecoder().decode([LoopChannelConfiguration].self, from: data)
+        else {
+            return []
+        }
+        return configurations.map { LoopChannel(configuration: $0) }
     }
 
     private static func trailingCharacters(_ text: String, limit: Int) -> String {
