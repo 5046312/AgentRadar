@@ -22,4 +22,10 @@ enum LoopOutputParser {
 
         return lastMessage
     }
+
+    static func completeFailureOutput(standardOutput: String, standardError: String) -> String {
+        guard !standardOutput.isEmpty else { return standardError }
+        guard !standardError.isEmpty else { return standardOutput }
+        return standardOutput + (standardOutput.hasSuffix("\n") ? "" : "\n") + standardError
+    }
 }

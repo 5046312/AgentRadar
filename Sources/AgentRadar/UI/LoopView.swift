@@ -137,7 +137,6 @@ struct LoopView: View {
     private func channelRow(_ channel: LoopChannel) -> some View {
         HStack(spacing: 6) {
             Button {
-                selectedChannelID = channel.id
                 operationError = nil
                 if channel.isActive || validationMessage == nil {
                     store.toggleChannel(id: channel.id)
@@ -145,8 +144,17 @@ struct LoopView: View {
                     operationError = "请先修正间隔配置。"
                 }
             } label: {
+                LoopChannelStatusRing(channel: channel)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(channel.isActive ? "停止渠道" : "启动渠道")
+
+            Button {
+                selectedChannelID = channel.id
+            } label: {
                 HStack(spacing: 9) {
-                    LoopChannelStatusRing(channel: channel)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(channel.name)
                             .font(.system(size: 11, weight: .semibold))
@@ -565,6 +573,7 @@ private struct LoopChannelEditorView: View {
             errorMessage = nil
         } catch {
             errorMessage = "模板保存失败：\(error.localizedDescription)"
+            showAlert(title: "模板保存失败", message: error.localizedDescription, style: .critical)
         }
     }
 
@@ -577,14 +586,38 @@ private struct LoopChannelEditorView: View {
 
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
-            let values = try LoopChannelImportValues(text: text)
-            name = values.name
-            baseURL = values.baseURL
-            apiKey = values.apiKey
-            errorMessage = nil
+            let values = try LoopChannelImportValues.parseMany(text: text)
+            if request.channelID != nil {
+                guard values.count == 1, let values = values.first else {
+                    throw LoopChannelImportError.multipleChannelsWhileEditing
+                }
+                name = values.name
+                baseURL = values.baseURL
+                apiKey = values.apiKey
+                errorMessage = nil
+                showAlert(title: "导入成功", message: "已填充渠道配置，请确认后保存。", style: .informational)
+            } else {
+                let channelIDs = try store.addChannels(values)
+                errorMessage = nil
+                showAlert(title: "导入成功", message: "已导入 \(channelIDs.count) 个渠道。", style: .informational)
+                if let firstChannelID = channelIDs.first {
+                    onSaved(firstChannelID)
+                }
+                dismiss()
+            }
         } catch {
             errorMessage = "TXT 导入失败：\(error.localizedDescription)"
+            showAlert(title: "TXT 导入失败", message: error.localizedDescription, style: .critical)
         }
+    }
+
+    private func showAlert(title: String, message: String, style: NSAlert.Style) {
+        let alert = NSAlert()
+        alert.alertStyle = style
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
     }
 
     private func save() {

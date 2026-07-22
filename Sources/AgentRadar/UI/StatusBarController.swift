@@ -155,7 +155,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
         loopSuccessCancellable = loopStore.$latestSuccess.compactMap { $0 }.sink { [weak self] notice in
             Task { @MainActor in
-                await self?.presentLoopSuccessNotice(notice)
+                self?.presentLoopSuccessNotice(notice)
             }
         }
         failureCancellable = store.$latestFailure.compactMap { $0 }.sink { [weak self] notice in
@@ -941,20 +941,12 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         )
     }
 
-    private func presentLoopSuccessNotice(_ notice: LoopSuccessNotice) async {
-        guard store.systemNotificationEnabled else { return }
-        if store.completionConfirmationEnabled {
-            showNoticeAlert(
-                title: notice.titleText,
-                body: notice.notificationBodyText,
-                style: .informational
-            )
-            return
-        }
-        _ = await showSystemNotification(
+    private func presentLoopSuccessNotice(_ notice: LoopSuccessNotice) {
+        // 渠道恢复必须明确确认；NSAlert 的模态循环不会取消或停止后台 Loop Task。
+        showNoticeAlert(
             title: notice.titleText,
             body: notice.notificationBodyText,
-            identifierPrefix: "loop-success"
+            style: .informational
         )
     }
 

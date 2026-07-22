@@ -86,14 +86,11 @@ final class LoopStore: ObservableObject {
 
     private enum LoopStoreError: LocalizedError {
         case codexNotFound
-        case outputFileCreationFailed
 
         var errorDescription: String? {
             switch self {
             case .codexNotFound:
                 return "未找到 codex，请先确认终端中可执行 command -v codex。"
-            case .outputFileCreationFailed:
-                return "无法创建 Loop 临时输出文件。"
             }
         }
     }
@@ -202,6 +199,30 @@ final class LoopStore: ObservableObject {
         channels.append(LoopChannel(configuration: configuration))
         persistChannels()
         return configuration.id
+    }
+
+    @discardableResult
+    func addChannels(_ values: [LoopChannelImportValues]) throws -> [UUID] {
+        let configurations = try values.map { values in
+            try LoopChannelConfiguration(
+                name: values.name,
+                baseURL: values.baseURL,
+                apiKey: values.apiKey
+            )
+        }
+        var names = channels.map(\.name)
+        for configuration in configurations {
+            guard !names.contains(where: {
+                $0.localizedCaseInsensitiveCompare(configuration.name) == .orderedSame
+            }) else {
+                throw LoopChannelStoreError.duplicateName
+            }
+            names.append(configuration.name)
+        }
+
+        channels.append(contentsOf: configurations.map { LoopChannel(configuration: $0) })
+        persistChannels()
+        return configurations.map(\.id)
     }
 
     func updateChannel(id: UUID, name: String, baseURL: String, apiKey: String?) throws {
@@ -414,7 +435,10 @@ final class LoopStore: ObservableObject {
                 terminationStatus: execution.terminationStatus,
                 message: message.map { Self.trailingCharacters($0, limit: Self.maximumDisplayedCharacters) },
                 errorText: message == nil
-                    ? Self.trailingCharacters(execution.standardError, limit: Self.maximumDisplayedCharacters)
+                    ? LoopOutputParser.completeFailureOutput(
+                        standardOutput: execution.standardOutput,
+                        standardError: execution.standardError
+                    )
                     : nil
             ))
         } catch {
@@ -425,7 +449,7 @@ final class LoopStore: ObservableObject {
                 duration: completedAt.timeIntervalSince(startedAt),
                 terminationStatus: nil,
                 message: nil,
-                errorText: Self.trailingCharacters(error.localizedDescription, limit: Self.maximumDisplayedCharacters)
+                errorText: error.localizedDescription
             ))
         }
     }
@@ -437,26 +461,15 @@ final class LoopStore: ObservableObject {
         environment: [String: String],
         channelID: UUID
     ) async throws -> ProcessExecution {
-        let fileManager = FileManager.default
-        let outputURL = fileManager.temporaryDirectory.appendingPathComponent("AgentRadar-Loop-\(UUID().uuidString).stdout")
-        let errorURL = fileManager.temporaryDirectory.appendingPathComponent("AgentRadar-Loop-\(UUID().uuidString).stderr")
-        guard fileManager.createFile(atPath: outputURL.path, contents: nil) else {
-            throw LoopStoreError.outputFileCreationFailed
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let outputReader = outputPipe.fileHandleForReading
+        let errorReader = errorPipe.fileHandleForReading
+        let outputReadTask = Task.detached(priority: .utility) {
+            try outputReader.readToEnd() ?? Data()
         }
-        guard fileManager.createFile(atPath: errorURL.path, contents: nil) else {
-            try? fileManager.removeItem(at: outputURL)
-            throw LoopStoreError.outputFileCreationFailed
-        }
-        defer {
-            try? fileManager.removeItem(at: outputURL)
-            try? fileManager.removeItem(at: errorURL)
-        }
-
-        let outputHandle = try FileHandle(forWritingTo: outputURL)
-        let errorHandle = try FileHandle(forWritingTo: errorURL)
-        defer {
-            try? outputHandle.close()
-            try? errorHandle.close()
+        let errorReadTask = Task.detached(priority: .utility) {
+            try errorReader.readToEnd() ?? Data()
         }
 
         let process = Process()
@@ -464,8 +477,8 @@ final class LoopStore: ObservableObject {
         process.arguments = arguments
         process.currentDirectoryURL = currentDirectoryURL
         process.environment = environment
-        process.standardOutput = outputHandle
-        process.standardError = errorHandle
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
 
         let terminationStatus = try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { terminatedProcess in
@@ -474,8 +487,13 @@ final class LoopStore: ObservableObject {
             do {
                 try process.run()
                 currentProcesses[channelID] = process
+                // 父进程关闭写端，仅保留子进程副本；后台读取持续排空 Pipe，避免大 JSON 堵塞。
+                outputPipe.fileHandleForWriting.closeFile()
+                errorPipe.fileHandleForWriting.closeFile()
             } catch {
                 process.terminationHandler = nil
+                outputPipe.fileHandleForWriting.closeFile()
+                errorPipe.fileHandleForWriting.closeFile()
                 continuation.resume(throwing: error)
             }
         }
@@ -483,11 +501,11 @@ final class LoopStore: ObservableObject {
             currentProcesses[channelID] = nil
         }
 
-        try outputHandle.synchronize()
-        try errorHandle.synchronize()
+        let outputData = try await outputReadTask.value
+        let errorData = try await errorReadTask.value
         return ProcessExecution(
-            standardOutput: String(data: try Data(contentsOf: outputURL), encoding: .utf8) ?? "",
-            standardError: String(data: try Data(contentsOf: errorURL), encoding: .utf8) ?? "",
+            standardOutput: String(data: outputData, encoding: .utf8) ?? "",
+            standardError: String(data: errorData, encoding: .utf8) ?? "",
             terminationStatus: terminationStatus
         )
     }
@@ -495,6 +513,7 @@ final class LoopStore: ObservableObject {
     private func apply(outcome: CodexExecutionOutcome, channelID: UUID) {
         guard let index = channels.firstIndex(where: { $0.id == channelID }) else { return }
         let previouslySucceeded = channels[index].streakSucceeded
+        let consecutiveFailureCount = previouslySucceeded == false ? channels[index].streakCount : 0
         channels[index].lastResult = outcome.result
         channels[index].errorMessage = nil
         channels[index].nextRunCount += 1
@@ -508,6 +527,8 @@ final class LoopStore: ObservableObject {
                 latestSuccess = LoopSuccessNotice(
                     channelName: channels[index].name,
                     count: outcome.result.count,
+                    failureCount: consecutiveFailureCount,
+                    succeededAt: outcome.result.completedAt,
                     message: message,
                     duration: outcome.result.duration
                 )

@@ -72,12 +72,23 @@ struct LoopSuccessNotice: Identifiable, Equatable {
     let id = UUID()
     let channelName: String
     let count: Int
+    let failureCount: Int
+    let succeededAt: Date
     let message: String
     let duration: TimeInterval
 
-    init(channelName: String, count: Int, message: String, duration: TimeInterval) {
+    init(
+        channelName: String,
+        count: Int,
+        failureCount: Int,
+        succeededAt: Date,
+        message: String,
+        duration: TimeInterval
+    ) {
         self.channelName = channelName
         self.count = count
+        self.failureCount = failureCount
+        self.succeededAt = succeededAt
         // 通知只展示结果开头，提前截断可避免完整长回复常驻通知状态。
         self.message = String(message.prefix(500))
         self.duration = duration
@@ -133,7 +144,12 @@ extension LoopSuccessNotice {
     }
 
     var notificationBodyText: String {
-        [message, formattedNoticeDuration(duration)]
+        [
+            "连续失败 \(failureCount) 次",
+            "成功时间 \(DateFormatter.localizedString(from: succeededAt, dateStyle: .none, timeStyle: .medium))",
+            message,
+            formattedNoticeDuration(duration)
+        ]
             .compactMap { $0 }
             .joined(separator: "\n")
     }

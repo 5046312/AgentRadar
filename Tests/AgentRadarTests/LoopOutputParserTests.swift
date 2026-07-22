@@ -13,4 +13,17 @@ final class LoopOutputParserTests: XCTestCase {
 
         XCTAssertEqual(LoopOutputParser.lastAgentMessage(in: output), "final answer")
     }
+
+    func testReturnsCompleteFailureOutputWithoutTruncatingJSON() {
+        let standardOutput = "{\"type\":\"error\",\"message\":\"\(String(repeating: "x", count: 25_000))\"}\n"
+        let standardError = "request failed\n"
+
+        let output = LoopOutputParser.completeFailureOutput(
+            standardOutput: standardOutput,
+            standardError: standardError
+        )
+
+        XCTAssertEqual(output, standardOutput + standardError)
+        XCTAssertGreaterThan(output.count, 25_000)
+    }
 }

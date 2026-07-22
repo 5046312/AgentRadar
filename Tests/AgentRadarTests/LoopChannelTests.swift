@@ -135,4 +135,56 @@ final class LoopChannelTests: XCTestCase {
         XCTAssertEqual(values.baseURL, "https://example.com/v1?token=a=b")
         XCTAssertEqual(values.apiKey, "sk-test=a=b")
     }
+
+    func testParsesMultipleChannelsSeparatedByDivider() throws {
+        let values = try LoopChannelImportValues.parseMany(text: """
+         name=渠道一
+         baseUrl=https://one.example.com/v1
+         apiKey=key-one
+
+         ---
+
+         name=渠道二
+         baseUrl=https://two.example.com/v1
+         apiKey=key-two
+        """)
+
+        XCTAssertEqual(values.map(\.name), ["渠道一", "渠道二"])
+        XCTAssertEqual(values.map(\.baseURL), ["https://one.example.com/v1", "https://two.example.com/v1"])
+        XCTAssertEqual(values.map(\.apiKey), ["key-one", "key-two"])
+    }
+
+    func testBatchAddRejectsDuplicateWithoutPartialImport() throws {
+        let suiteName = "LoopChannelBatchTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LoopStore(defaults: defaults)
+        try store.addChannel(name: "已有渠道", baseURL: "https://existing.example.com", apiKey: "key")
+        let values = try LoopChannelImportValues.parseMany(text: """
+        name=新渠道
+        baseUrl=https://new.example.com
+        apiKey=key
+        ---
+        name=已有渠道
+        baseUrl=https://duplicate.example.com
+        apiKey=key
+        """)
+
+        XCTAssertThrowsError(try store.addChannels(values))
+        XCTAssertEqual(store.channels.map(\.name), ["已有渠道"])
+    }
+
+    func testRecoveryNoticeIncludesFailureCountAndSuccessTime() {
+        let notice = LoopSuccessNotice(
+            channelName: "主渠道",
+            count: 8,
+            failureCount: 3,
+            succeededAt: Date(timeIntervalSince1970: 1_721_606_400),
+            message: "恢复",
+            duration: 2
+        )
+
+        XCTAssertTrue(notice.notificationBodyText.contains("连续失败 3 次"))
+        XCTAssertTrue(notice.notificationBodyText.contains("成功时间"))
+    }
 }
