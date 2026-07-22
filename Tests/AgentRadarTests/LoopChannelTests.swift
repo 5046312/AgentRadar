@@ -122,6 +122,47 @@ final class LoopChannelTests: XCTestCase {
             "model_providers.agentradar_loop.env_key=\"AGENTRADAR_LOOP_API_KEY\"",
             "model_providers.agentradar_loop.supports_websockets=false"
         ])
+        let script = channel.displayScript(
+            executablePath: "/opt/homebrew/bin/codex",
+            count: 4,
+            enabledOptions: Set(LoopCommandOption.allCases)
+        )
+        XCTAssertTrue(script.contains("/opt/homebrew/bin/codex exec"))
+        XCTAssertTrue(script.contains("AGENTRADAR_LOOP_API_KEY=secret"))
+        XCTAssertTrue(script.hasSuffix(" 4"))
+    }
+
+    func testCodexArgumentsAlwaysKeepJSONAndOnlyIncludeSelectedOptions() throws {
+        let channel = try LoopChannelConfiguration(
+            name: "主渠道",
+            baseURL: "https://rawchat.cn/codex",
+            apiKey: "secret"
+        )
+
+        let arguments = channel.codexArguments(count: 2, enabledOptions: [.disableHooks])
+
+        XCTAssertTrue(arguments.contains("--json"))
+        XCTAssertTrue(arguments.contains("--disable"))
+        XCTAssertTrue(arguments.contains("hooks"))
+        XCTAssertFalse(arguments.contains("--ephemeral"))
+        XCTAssertFalse(arguments.contains("--ignore-rules"))
+        XCTAssertFalse(arguments.contains("--sandbox"))
+        XCTAssertFalse(arguments.contains("--skip-git-repo-check"))
+        XCTAssertEqual(arguments.last, "2")
+    }
+
+    func testPersistsEmptyCommandOptionSelection() {
+        let suiteName = "LoopCommandOptionTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LoopStore(defaults: defaults)
+
+        XCTAssertEqual(store.enabledCommandOptions, Set(LoopCommandOption.allCases))
+        for option in LoopCommandOption.allCases {
+            store.setCommandOption(option, enabled: false)
+        }
+
+        XCTAssertTrue(LoopStore(defaults: defaults).enabledCommandOptions.isEmpty)
     }
 
     func testParsesChannelTXTTemplateAndKeepsEqualsInsideValues() throws {

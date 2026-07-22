@@ -153,6 +153,36 @@ enum LoopAggregateStatus: Equatable {
     }
 }
 
+enum LoopCommandOption: String, CaseIterable, Hashable, Identifiable {
+    case ephemeral
+    case ignoreRules
+    case disableHooks
+    case readOnlySandbox
+    case skipGitRepoCheck
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ephemeral: return "--ephemeral"
+        case .ignoreRules: return "--ignore-rules"
+        case .disableHooks: return "--disable hooks"
+        case .readOnlySandbox: return "--sandbox read-only"
+        case .skipGitRepoCheck: return "--skip-git-repo-check"
+        }
+    }
+
+    var arguments: [String] {
+        switch self {
+        case .ephemeral: return ["--ephemeral"]
+        case .ignoreRules: return ["--ignore-rules"]
+        case .disableHooks: return ["--disable", "hooks"]
+        case .readOnlySandbox: return ["--sandbox", "read-only"]
+        case .skipGitRepoCheck: return ["--skip-git-repo-check"]
+        }
+    }
+}
+
 struct LoopChannelConfiguration: Codable, Equatable, Identifiable {
     static let apiKeyEnvironmentName = "AGENTRADAR_LOOP_API_KEY"
 
@@ -170,6 +200,30 @@ struct LoopChannelConfiguration: Codable, Equatable, Identifiable {
             "model_providers.agentradar_loop.env_key=\"\(Self.apiKeyEnvironmentName)\"",
             "model_providers.agentradar_loop.supports_websockets=false"
         ]
+    }
+
+    func codexArguments(count: Int, enabledOptions: Set<LoopCommandOption>) -> [String] {
+        // JSON 输出用于结果解析，固定保留；其余参数严格按面板勾选状态生成。
+        let optionalArguments = LoopCommandOption.allCases
+            .filter(enabledOptions.contains)
+            .flatMap(\.arguments)
+        return ["exec"]
+            + codexConfigurationOverrides.flatMap { ["-c", $0] }
+            + ["--json"]
+            + optionalArguments
+            + [String(count)]
+    }
+
+    func displayScript(
+        executablePath: String,
+        count: Int,
+        enabledOptions: Set<LoopCommandOption>
+    ) -> String {
+        let environment = "\(Self.apiKeyEnvironmentName)=\(Self.shellQuoted(apiKey))"
+        let command = ([executablePath] + codexArguments(count: count, enabledOptions: enabledOptions))
+            .map(Self.shellQuoted)
+            .joined(separator: " ")
+        return "\(environment) \(command)"
     }
 
     init(id: UUID = UUID(), name: String, baseURL: String, apiKey: String) throws {
@@ -206,6 +260,14 @@ struct LoopChannelConfiguration: Codable, Equatable, Identifiable {
             return true
         }
         return scheme == "http" && (host == "localhost" || host == "127.0.0.1")
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        let safeCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._/:?=@+,%"))
+        if !value.isEmpty, value.unicodeScalars.allSatisfy({ safeCharacters.contains($0) }) {
+            return value
+        }
+        return "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
     }
 }
 

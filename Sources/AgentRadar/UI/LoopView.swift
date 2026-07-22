@@ -18,6 +18,7 @@ struct LoopView: View {
             header
 
             intervalSection
+            commandOptionSection
 
             if let validationMessage {
                 Text(validationMessage)
@@ -52,6 +53,24 @@ struct LoopView: View {
                 onSaved: { channelID in selectedChannelID = channelID },
                 onDeleted: { selectedChannelID = nil }
             )
+        }
+    }
+
+    private var commandOptionSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("额外参数")
+                .font(.system(size: 11, weight: .medium))
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2),
+                alignment: .leading,
+                spacing: 5
+            ) {
+                ForEach(LoopCommandOption.allCases) { option in
+                    Toggle(option.title, isOn: commandOptionBinding(option))
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 10, design: .monospaced))
+                }
+            }
         }
     }
 
@@ -267,13 +286,15 @@ struct LoopView: View {
 
             GeometryReader { geometry in
                 let spacing: CGFloat = 8
-                let availableHeight = max(0, geometry.size.height - spacing)
+                let availableHeight = max(0, geometry.size.height - spacing * 2)
 
                 VStack(spacing: spacing) {
+                    resultContentPanel(title: "运行脚本", text: result.script, copyText: result.script)
+                        .frame(height: availableHeight * 0.30)
                     resultContentPanel(title: "发送内容", text: String(result.count))
-                        .frame(height: availableHeight * 0.25)
+                        .frame(height: availableHeight * 0.18)
                     resultContentPanel(title: "返回内容", text: result.displayText)
-                        .frame(height: availableHeight * 0.75)
+                        .frame(height: availableHeight * 0.52)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -281,11 +302,28 @@ struct LoopView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func resultContentPanel(title: String, text: String) -> some View {
+    private func resultContentPanel(title: String, text: String, copyText: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let copyText {
+                    Button {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(copyText, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("复制上次运行脚本")
+                    .accessibilityLabel("复制上次运行脚本")
+                }
+            }
             ScrollView {
                 Text(text)
                     .font(.system(size: 11, design: .monospaced))
@@ -354,6 +392,13 @@ struct LoopView: View {
             text: $successMinimumText,
             otherText: successMaximumText,
             persist: { minimum, maximum in store.setSuccessSecondRange(LoopSecondRange(minimum: minimum, maximum: maximum)!) }
+        )
+    }
+
+    private func commandOptionBinding(_ option: LoopCommandOption) -> Binding<Bool> {
+        Binding(
+            get: { store.enabledCommandOptions.contains(option) },
+            set: { store.setCommandOption(option, enabled: $0) }
         )
     }
 

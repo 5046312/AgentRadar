@@ -11,6 +11,7 @@ enum LoopPhase: Equatable {
 
 struct LoopRunResult: Equatable {
     let count: Int
+    let script: String
     let completedAt: Date
     let duration: TimeInterval
     let terminationStatus: Int32?
@@ -79,6 +80,7 @@ final class LoopStore: ObservableObject {
         static let successMaximumSeconds = "loopSuccessMaximumSeconds"
         static let failureMinimumSeconds = "loopFailureMinimumSeconds"
         static let failureMaximumSeconds = "loopFailureMaximumSeconds"
+        static let enabledCommandOptions = "loopEnabledCommandOptions"
         static let channels = "loopChannels"
         static let legacyMinimumMinutes = "loopMinimumMinutes"
         static let legacyMaximumMinutes = "loopMaximumMinutes"
@@ -115,6 +117,7 @@ final class LoopStore: ObservableObject {
     @Published private(set) var successMaximumSeconds: Int
     @Published private(set) var failureMinimumSeconds: Int
     @Published private(set) var failureMaximumSeconds: Int
+    @Published private(set) var enabledCommandOptions: Set<LoopCommandOption>
     @Published private(set) var channels: [LoopChannel]
     @Published private(set) var latestSuccess: LoopSuccessNotice?
 
@@ -153,6 +156,7 @@ final class LoopStore: ObservableObject {
         successMaximumSeconds = successRange.maximum
         failureMinimumSeconds = failureRange.minimum
         failureMaximumSeconds = failureRange.maximum
+        enabledCommandOptions = Self.loadCommandOptions(defaults: defaults)
         channels = Self.loadChannels(defaults: defaults)
     }
 
@@ -188,6 +192,18 @@ final class LoopStore: ObservableObject {
         failureMaximumSeconds = range.maximum
         defaults.set(range.minimum, forKey: DefaultsKey.failureMinimumSeconds)
         defaults.set(range.maximum, forKey: DefaultsKey.failureMaximumSeconds)
+    }
+
+    func setCommandOption(_ option: LoopCommandOption, enabled: Bool) {
+        if enabled {
+            enabledCommandOptions.insert(option)
+        } else {
+            enabledCommandOptions.remove(option)
+        }
+        let storedValues = LoopCommandOption.allCases
+            .filter(enabledCommandOptions.contains)
+            .map(\.rawValue)
+        defaults.set(storedValues, forKey: DefaultsKey.enabledCommandOptions)
     }
 
     @discardableResult
@@ -403,21 +419,19 @@ final class LoopStore: ObservableObject {
         count: Int,
         startedAt: Date
     ) async -> CodexExecutionOutcome {
+        let enabledOptions = enabledCommandOptions
+        let arguments = configuration.codexArguments(count: count, enabledOptions: enabledOptions)
+        let script = configuration.displayScript(
+            executablePath: context.executableURL.path,
+            count: count,
+            enabledOptions: enabledOptions
+        )
         do {
-            let configurationArguments = configuration.codexConfigurationOverrides.flatMap { ["-c", $0] }
             var environment = context.executionEnvironment(base: ProcessInfo.processInfo.environment)
             environment[LoopChannelConfiguration.apiKeyEnvironmentName] = configuration.apiKey
             let execution = try await runProcess(
                 executableURL: context.executableURL,
-                arguments: ["exec"] + configurationArguments + [
-                    "--json",
-                    "--ephemeral",
-                    "--ignore-rules",
-                    "--disable", "hooks",
-                    "--sandbox", "read-only",
-                    "--skip-git-repo-check",
-                    String(count)
-                ],
+                arguments: arguments,
                 currentDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
                 environment: environment,
                 channelID: channelID
@@ -430,6 +444,7 @@ final class LoopStore: ObservableObject {
 
             return CodexExecutionOutcome(result: LoopRunResult(
                 count: count,
+                script: script,
                 completedAt: completedAt,
                 duration: completedAt.timeIntervalSince(startedAt),
                 terminationStatus: execution.terminationStatus,
@@ -445,6 +460,7 @@ final class LoopStore: ObservableObject {
             let completedAt = Date()
             return CodexExecutionOutcome(result: LoopRunResult(
                 count: count,
+                script: script,
                 completedAt: completedAt,
                 duration: completedAt.timeIntervalSince(startedAt),
                 terminationStatus: nil,
@@ -620,6 +636,14 @@ final class LoopStore: ObservableObject {
             return []
         }
         return configurations.map { LoopChannel(configuration: $0) }
+    }
+
+    private static func loadCommandOptions(defaults: UserDefaults) -> Set<LoopCommandOption> {
+        guard defaults.object(forKey: DefaultsKey.enabledCommandOptions) != nil else {
+            return Set(LoopCommandOption.allCases)
+        }
+        let storedValues = defaults.stringArray(forKey: DefaultsKey.enabledCommandOptions) ?? []
+        return Set(storedValues.compactMap(LoopCommandOption.init(rawValue:)))
     }
 
     private static func trailingCharacters(_ text: String, limit: Int) -> String {
