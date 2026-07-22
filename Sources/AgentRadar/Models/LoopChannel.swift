@@ -34,6 +34,57 @@ enum LoopChannelStoreError: LocalizedError, Equatable {
     }
 }
 
+enum LoopChannelImportError: LocalizedError, Equatable {
+    case missingField(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .missingField(field):
+            return "TXT 缺少 \(field)=...。"
+        }
+    }
+}
+
+struct LoopChannelImportValues: Equatable {
+    static let templateText = """
+    name=主渠道
+    baseUrl=https://example.com/v1
+    apiKey=请替换为真实API Key
+    """
+
+    let name: String
+    let baseURL: String
+    let apiKey: String
+
+    init(text: String) throws {
+        var fields: [String: String] = [:]
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine
+                .replacingOccurrences(of: "\u{FEFF}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#"), let separator = line.firstIndex(of: "=") else {
+                continue
+            }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            fields[key] = value
+        }
+
+        guard let name = fields["name"], !name.isEmpty else {
+            throw LoopChannelImportError.missingField("name")
+        }
+        guard let baseURL = fields["baseurl"], !baseURL.isEmpty else {
+            throw LoopChannelImportError.missingField("baseUrl")
+        }
+        guard let apiKey = fields["apikey"], !apiKey.isEmpty else {
+            throw LoopChannelImportError.missingField("apiKey")
+        }
+        self.name = name
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+    }
+}
+
 enum LoopAggregateStatus: Equatable {
     case inactive
     case pending

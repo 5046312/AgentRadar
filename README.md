@@ -94,7 +94,7 @@ Restart current Claude/Codex sessions after installing hooks. Codex may ask you 
 
 ## Loop Availability Test
 
-Click the test-tube button in the main popover to open the independent Loop panel. The panel supports multiple named channels, each with its own base URL and API key. Clicking a channel row starts or stops it independently. Running channels execute in parallel; each start runs its first check immediately, then waits within the shared success or failure interval selected from that channel's previous result.
+Click the test-tube button in the main popover to open the independent Loop panel. The panel supports multiple named channels, each with its own base URL and API key; the channel editor can download and import a TXT template. Clicking a channel row starts or stops it independently. Running channels execute in parallel; each start runs its first check immediately, then waits within the shared success or failure interval selected from that channel's previous result.
 
 Each channel invokes `codex exec --json` through a temporary custom provider in read-only mode. Requests use the Responses API over HTTPS with WebSockets disabled and do not modify the user's Codex configuration. API keys are not revealed again after saving. AgentRadar shows per-channel state, success/failure counts, and the latest result, and only sends a channel-named notification when a failed channel recovers. Loop checks do not create normal AgentRadar sessions, and all channels stop when AgentRadar exits.
 

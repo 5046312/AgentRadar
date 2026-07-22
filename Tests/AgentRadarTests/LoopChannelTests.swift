@@ -123,4 +123,16 @@ final class LoopChannelTests: XCTestCase {
             "model_providers.agentradar_loop.supports_websockets=false"
         ])
     }
+
+    func testParsesChannelTXTTemplateAndKeepsEqualsInsideValues() throws {
+        let values = try LoopChannelImportValues(text: """
+        name=主渠道
+        baseUrl=https://example.com/v1?token=a=b
+        apiKey=sk-test=a=b
+        """)
+
+        XCTAssertEqual(values.name, "主渠道")
+        XCTAssertEqual(values.baseURL, "https://example.com/v1?token=a=b")
+        XCTAssertEqual(values.apiKey, "sk-test=a=b")
+    }
 }

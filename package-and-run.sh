@@ -10,6 +10,12 @@ INSTALLED_EXECUTABLE="$INSTALLED_APP/Contents/MacOS/$APP_NAME"
 INSTALL_WORK_DIR=""
 BACKUP_APP=""
 HAD_INSTALLED_APP=false
+RUNNING_APP_PATTERN="/AgentRadar.app/Contents/MacOS/$APP_NAME$"
+
+running_app_pids() {
+    # 只识别已打包 App；避免把 .build/debug/AgentRadar 等同名进程误判成旧安装实例。
+    pgrep -f "$RUNNING_APP_PATTERN" || true
+}
 
 cleanup() {
     if [[ -n "$INSTALL_WORK_DIR" && -d "$INSTALL_WORK_DIR" ]]; then
@@ -41,28 +47,29 @@ echo "[2/5] 打包 $APP_NAME.dmg"
 ./make-dmg.sh
 
 echo "[3/5] 关闭旧实例"
-if pgrep -x "$APP_NAME" >/dev/null; then
+OLD_PIDS="$(running_app_pids)"
+if [[ -n "$OLD_PIDS" ]]; then
     # 先结束本地包或旧安装包进程，避免 LaunchServices 继续激活旧实例。
     osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
     for _ in {1..20}; do
-        if ! pgrep -x "$APP_NAME" >/dev/null; then
+        if [[ -z "$(running_app_pids)" ]]; then
             break
         fi
         sleep 0.1
     done
-    pkill -x "$APP_NAME" 2>/dev/null || true
+    pkill -f "$RUNNING_APP_PATTERN" 2>/dev/null || true
     for _ in {1..20}; do
-        if ! pgrep -x "$APP_NAME" >/dev/null; then
+        if [[ -z "$(running_app_pids)" ]]; then
             break
         fi
         sleep 0.1
     done
-    if pgrep -x "$APP_NAME" >/dev/null; then
+    if [[ -n "$(running_app_pids)" ]]; then
         echo "无法关闭旧实例，停止安装。" >&2
         exit 1
     fi
 else
-    echo "未发现运行中的 $APP_NAME"
+    echo "未发现已打包的旧实例，继续安装"
 fi
 
 echo "[4/5] 安装到 $INSTALLED_APP"

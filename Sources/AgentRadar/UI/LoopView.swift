@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct LoopView: View {
     @ObservedObject var store: LoopStore
@@ -33,7 +35,6 @@ struct LoopView: View {
         }
         .padding(14)
         .frame(width: 420, height: 500, alignment: .topLeading)
-        .focusEffectDisabled()
         .onAppear {
             successMinimumText = String(store.successMinimumSeconds)
             successMaximumText = String(store.successMaximumSeconds)
@@ -44,7 +45,7 @@ struct LoopView: View {
         .onChange(of: store.channels.map(\.id)) { _, _ in
             selectAvailableChannel()
         }
-        .sheet(item: $editorRequest) { request in
+        .popover(item: $editorRequest, arrowEdge: .leading) { request in
             LoopChannelEditorView(
                 store: store,
                 request: request,
@@ -464,6 +465,13 @@ private struct LoopChannelEditorView: View {
     @State private var apiKey = ""
     @State private var errorMessage: String?
     @State private var showingDeleteConfirmation = false
+    @FocusState private var focusedField: EditorField?
+
+    private enum EditorField {
+        case name
+        case baseURL
+        case apiKey
+    }
 
     init(
         store: LoopStore,
@@ -481,19 +489,27 @@ private struct LoopChannelEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(request.channelID == nil ? "添加渠道" : "编辑渠道")
-                .font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                Text(request.channelID == nil ? "添加渠道" : "编辑渠道")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("下载模板") { downloadTemplate() }
+                    .buttonStyle(.bordered)
+                Button("导入 TXT") { importTXT() }
+                    .buttonStyle(.bordered)
+            }
 
             labeledField("名称") {
                 TextField("主渠道", text: $name)
+                    .focused($focusedField, equals: .name)
             }
             labeledField("Base URL") {
                 TextField("https://example.com/v1", text: $baseURL)
-                    .textContentType(.URL)
+                    .focused($focusedField, equals: .baseURL)
             }
             labeledField("API Key") {
-                SecureField(request.channelID == nil ? "必填" : "已配置，留空保留", text: $apiKey)
-                    .textContentType(.password)
+                TextField(request.channelID == nil ? "必填" : "已配置，留空保留", text: $apiKey)
+                    .focused($focusedField, equals: .apiKey)
             }
 
             if let errorMessage {
@@ -517,6 +533,11 @@ private struct LoopChannelEditorView: View {
         }
         .padding(16)
         .frame(width: 380)
+        .onAppear {
+            DispatchQueue.main.async {
+                focusedField = .name
+            }
+        }
         .confirmationDialog("确认删除该渠道？", isPresented: $showingDeleteConfirmation) {
             Button("删除渠道", role: .destructive) { deleteChannel() }
             Button("取消", role: .cancel) {}
@@ -529,6 +550,40 @@ private struct LoopChannelEditorView: View {
                 .font(.system(size: 11, weight: .medium))
             content()
                 .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func downloadTemplate() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "AgentRadar-Loop-Channel-Template.txt"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try LoopChannelImportValues.templateText.write(to: url, atomically: true, encoding: .utf8)
+            errorMessage = nil
+        } catch {
+            errorMessage = "模板保存失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func importTXT() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let values = try LoopChannelImportValues(text: text)
+            name = values.name
+            baseURL = values.baseURL
+            apiKey = values.apiKey
+            errorMessage = nil
+        } catch {
+            errorMessage = "TXT 导入失败：\(error.localizedDescription)"
         }
     }
 
